@@ -24,7 +24,7 @@ public:
     ~Runner() override;
 
     // Compute module(inputs, params) after delayMs of quiet. Replaces any pending or running request.
-    void submit(const Module* module, InputsPtr inputs, Params params, int delayMs);
+    void submit(const Module* module, InputsPtr inputs, Params params, bool compare, int delayMs);
     // Load a sample (or user files) off the UI thread.
     void load(std::function<Inputs()> loader);
     void cancel();
@@ -48,6 +48,7 @@ private:
     const Module* module_ = nullptr;
     InputsPtr inputs_;
     Params params_;
+    bool compare_ = false;
     std::stop_source stop_;
     std::uint64_t generation_ = 0;      // a result is shown only if its generation is still current
     std::uint64_t loadGeneration_ = 0;

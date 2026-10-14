@@ -6,7 +6,10 @@
 #include <QStyleFactory>
 
 // The stylesheet lives in a static library, so its resources must be registered by hand.
-static void initThemeResources() { Q_INIT_RESOURCE(theme); }
+static void initThemeResources() {
+    Q_INIT_RESOURCE(theme);
+    Q_INIT_RESOURCE(sources);
+}
 
 namespace vl::app {
 

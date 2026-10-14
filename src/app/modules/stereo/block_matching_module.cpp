@@ -9,6 +9,7 @@
 #include "app/modules/stereo/stereo_samples.hpp"
 #include "core/common/image.hpp"
 #include "core/stereo/block_matching.hpp"
+#include "core/stereo/opencv_baselines.hpp"
 
 namespace vl::app {
 namespace {
@@ -23,7 +24,8 @@ public:
                                "windows look most alike."),
                 QStringLiteral("switch the cost from SAD to ZNCC on <i>Cones</i>, then grow the window and watch thin "
                                "objects swell while noise disappears."),
-                InputKind::ImagePair, 300, QStringLiteral("Disparity")};
+                InputKind::ImagePair, 300, QStringLiteral("Disparity"), QStringLiteral("cv::StereoBM"),
+                {QStringLiteral("src/core/stereo/block_matching.hpp"), QStringLiteral("src/core/stereo/block_matching.cpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -54,7 +56,9 @@ public:
         bp.maxDisparity = std::min(intParam(p, "maxd"), stereo_samples::maxDisparityHint(in));
         bp.leftRightCheck = toggleParam(p, "lr");
         bp.subpixel = toggleParam(p, "subpixel");
+        const vl::Stopwatch clock;
         const auto res = stereo::blockMatch(in.images[0], in.images[1], bp, ctx.stop, ctx.progress);
+        const double oursMs = clock.ms();
 
         const bool hasTruth = !in.truth.empty() && !in.truth[0].empty();
         const cv::Mat truth = hasTruth ? in.truth[0] : cv::Mat();
@@ -121,8 +125,38 @@ public:
         out.stats.push_back({QStringLiteral("Disparities searched"), QStringLiteral("0 – %1 px").arg(bp.maxDisparity)});
         out.stats.push_back({QStringLiteral("Cost evaluations"),
                              QString::number(double(d.total()) * (bp.maxDisparity + 1), 'g', 3)});
+        if (ctx.compare) compareWithOpenCv(in, bp, res.disparity, oursMs, f, out);
         out.frames.push_back(std::move(f));
         return out;
+    }
+
+    // The same pair through cv::StereoBM, with the same window and search range: its disparity map
+    // next to ours, and the same measurements side by side.
+    static void compareWithOpenCv(const Inputs& in, const stereo::BlockMatchParams& bp, const cv::Mat& ours,
+                                  double oursMs, Frame& f, Output& out) {
+        const auto cvRes = stereo::opencv::blockMatching(in.images[0], in.images[1], bp.maxDisparity, bp.radius);
+        const cv::Mat& theirs = cvRes.disparity;
+        const cv::Mat valid = theirs == theirs;
+        cv::Mat shown;
+        theirs.copyTo(shown);
+        shown.setTo(0, ~valid);
+        View v{QStringLiteral("OpenCV · Disparity"), toQImage(vl::colorize(shown, 0, bp.maxDisparity, valid)), {}, {}, theirs,
+               Legend{QStringLiteral("cv::StereoBM disparity (px) · black: no answer"), 0, double(bp.maxDisparity), {}, {}}};
+        v.probe = [theirs](QPoint q) {
+            const float d = theirs.at<float>(q.y(), q.x());
+            return std::isfinite(d) ? QStringLiteral("OpenCV d = %1 px").arg(d, 0, 'f', 1) : QStringLiteral("OpenCV: no answer");
+        };
+        f.views.push_back(std::move(v));
+
+        auto answered = [](const cv::Mat& d) { return 100.0 * cv::countNonZero(d == d) / double(d.total()); };
+        if (!in.truth.empty() && !in.truth[0].empty()) {
+            const cv::Mat visible = in.truth.size() > 1 ? in.truth[1] : cv::Mat();
+            out.comparison.push_back({QStringLiteral("Bad pixels (error > 1 px)"),
+                                      100 * stereo::badPixelRate(ours, in.truth[0], visible, 1.0),
+                                      100 * stereo::badPixelRate(theirs, in.truth[0], visible, 1.0), QStringLiteral(" %")});
+        }
+        out.comparison.push_back({QStringLiteral("Pixels with an answer"), answered(ours), answered(theirs), QStringLiteral(" %"), 1, false});
+        out.comparison.push_back({QStringLiteral("Run time"), oursMs, cvRes.ms, QStringLiteral(" ms"), 0});
     }
 
     // Click a left pixel: show its window, the row it is searched along in the right image, and the match.

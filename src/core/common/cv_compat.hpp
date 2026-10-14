@@ -1,6 +1,6 @@
 #pragma once
-// OpenCV 4 and 5 put the same functions in differently named modules. Include this instead of
-// the module headers when you need SIFT, homography / fundamental estimation or reference flow.
+// OpenCV 4 and 5 put the same functions in differently named modules. Include this instead of the
+// module headers when you call OpenCV's own methods: the baselines our implementations are compared to.
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -17,4 +17,8 @@
 #include <opencv2/calib3d.hpp>  // OpenCV 4
 #endif
 
-#include <opencv2/video/tracking.hpp>  // reference optical flow, used by the tests only
+#if __has_include(<opencv2/stereo.hpp>)
+#include <opencv2/stereo.hpp>  // OpenCV 5: StereoBM, StereoSGBM (OpenCV 4 has them in calib3d, included above)
+#endif
+
+#include <opencv2/video.hpp>  // OpenCV baselines: optical flow, background subtraction, meanShift

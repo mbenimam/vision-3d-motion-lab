@@ -50,6 +50,8 @@ public:
     void setFrame(int frame);
     void setView(int view);
     void setClickShapes(std::vector<Module::ClickShapes> shapes);
+    bool compare() const { return compare_; }  // run the OpenCV baseline too (all topics)
+    void setCompare(bool on);
 
 signals:
     void currentChanged(int index);
@@ -66,6 +68,7 @@ private:
     void saveParams(const ModuleState& s) const;
     std::vector<ModuleState> states_;
     int current_ = 0;
+    bool compare_ = false;
 };
 
 }  // namespace vl::app

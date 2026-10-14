@@ -263,6 +263,14 @@ Inspector::Inspector(QWidget* parent) : QScrollArea(parent) {
     error_->setObjectName(QStringLiteral("error"));
     error_->setWordWrap(true);
     rl->addWidget(error_);
+    // Ours vs OpenCV: one row per measurement, the better value marked.
+    compareBox_ = new QWidget;
+    compareBox_->setObjectName(QStringLiteral("compareTable"));
+    compareGrid_ = new QGridLayout(compareBox_);
+    compareGrid_->setContentsMargins(10, 8, 10, 8);
+    compareGrid_->setHorizontalSpacing(10);
+    compareGrid_->setVerticalSpacing(5);
+    rl->addWidget(compareBox_);
     auto* grid = new QWidget;
     statsGrid_ = new QGridLayout(grid);
     statsGrid_->setContentsMargins(0, 0, 0, 0);
@@ -353,6 +361,34 @@ void Inspector::setResult(const ModuleState& s) {
     }
     error_->setText(s.error);
     error_->setVisible(!s.error.isEmpty());
+
+    while (auto* item = compareGrid_->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+    const bool hasComparison = s.output && !s.output->comparison.empty();
+    compareBox_->setVisible(hasComparison);
+    if (hasComparison) {
+        auto cell = [this](const QString& text, const char* name, int r, int c, Qt::Alignment a) {
+            auto* l = new QLabel(text);
+            l->setObjectName(QString::fromLatin1(name));
+            l->setWordWrap(c == 0);
+            compareGrid_->addWidget(l, r, c, a);
+        };
+        cell({}, "compareHead", 0, 0, Qt::AlignLeft);
+        cell(tr("Ours"), "compareHead", 0, 1, Qt::AlignRight);
+        cell(tr("OpenCV"), "compareHead", 0, 2, Qt::AlignRight);
+        int r = 1;
+        for (const auto& c : s.output->comparison) {
+            const bool tie = std::abs(c.ours - c.opencv) < 0.5 * std::pow(10.0, -c.decimals);
+            const bool oursWins = !tie && ((c.ours < c.opencv) == c.lowerIsBetter);
+            cell(c.metric, "statLabel", r, 0, Qt::AlignLeft);
+            cell(fmt(c.ours, c.decimals) + c.unit, tie ? "statValue" : oursWins ? "winner" : "statValue", r, 1, Qt::AlignRight);
+            cell(fmt(c.opencv, c.decimals) + c.unit, tie ? "statValue" : oursWins ? "statValue" : "winner", r, 2, Qt::AlignRight);
+            ++r;
+        }
+        compareGrid_->setColumnStretch(0, 1);
+    }
 
     std::vector<Stat> stats;
     if (s.output) {

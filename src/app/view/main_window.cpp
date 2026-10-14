@@ -95,10 +95,12 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     fit_ = tool(tr("Fit"), tr("Fit the picture (F, or double-click)"));
     one_ = tool(tr("1:1"), tr("One image pixel per screen pixel"));
     export_ = tool(tr("Export"), tr("Save the picture with its overlays as PNG (Ctrl+E)"));
+    code_ = tool(tr("Read the code"), tr("Our from-scratch implementation of this topic (Ctrl+K)"));
     top->addWidget(zoom_);
     top->addWidget(fit_);
     top->addWidget(one_);
     top->addWidget(export_);
+    top->addWidget(code_);
     hv->addLayout(top);
 
     auto* second = new QHBoxLayout;
@@ -116,6 +118,13 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     busyLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);  // long messages never push the layout
     busyLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     second->addWidget(busyLabel_, 1);
+    // Our implementation is the topic; OpenCV's is the baseline it is measured against.
+    compare_ = new QPushButton(tr("Compare with OpenCV"));
+    compare_->setObjectName(QStringLiteral("compare"));
+    compare_->setCheckable(true);
+    compare_->setChecked(doc.compare());
+    compare_->setCursor(Qt::PointingHandCursor);
+    second->addWidget(compare_);
 
     hv->addLayout(second);
     cv->addWidget(header);
@@ -156,6 +165,10 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     connect(fit_, &QToolButton::clicked, canvas_, &Canvas::fit);
     connect(one_, &QToolButton::clicked, canvas_, [this] { canvas_->zoomTo(1.0); });
     connect(export_, &QToolButton::clicked, this, &MainWindow::exportRequested);
+    connect(code_, &QToolButton::clicked, this, &MainWindow::codeRequested);
+    connect(compare_, &QPushButton::toggled, this, &MainWindow::compareToggled);
+    auto* codeKey = new QShortcut(QKeySequence(tr("Ctrl+K")), this);
+    connect(codeKey, &QShortcut::activated, this, &MainWindow::codeRequested);
     connect(canvas_, &Canvas::zoomChanged, this, [this](double z) { zoom_->setText(QStringLiteral("%1%").arg(qRound(z * 100))); });
     connect(canvas_, &Canvas::hover, this, [this](const QString& t) { status_->setText(t.isEmpty() ? QStringLiteral(" ") : t); });
     connect(tabGroup_, &QButtonGroup::idClicked, this, &MainWindow::viewChosen);
@@ -173,6 +186,12 @@ void MainWindow::showModule() {
     const auto& s = doc_.current();
     crumb_->setText(s.info.group.toUpper());
     title_->setText(s.info.title);
+    compare_->setVisible(!s.info.baseline.isEmpty());
+    compare_->setToolTip(tr("Also run OpenCV's %1 on the same input and compare accuracy and time").arg(s.info.baseline));
+    {
+        const QSignalBlocker block(compare_);
+        compare_->setChecked(doc_.compare());
+    }
     nav_->select(doc_.currentIndex());
     inspector_->setModule(s);
     inspector_->setBoxToolChecked(false);

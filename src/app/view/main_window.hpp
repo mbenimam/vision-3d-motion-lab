@@ -7,6 +7,7 @@
 #include "app/model/document.hpp"
 
 class QButtonGroup;
+class QPushButton;
 class QLabel;
 class QProgressBar;
 class QToolButton;
@@ -39,6 +40,8 @@ signals:
     void viewChosen(int view);
     void exportRequested();
     void openRequested();
+    void compareToggled(bool on);
+    void codeRequested();
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
@@ -65,6 +68,8 @@ private:
     QLabel* status_;
     QLabel* busyLabel_;
     QLabel* headline_;
+    QPushButton* compare_;
+    QToolButton* code_;
 };
 
 }  // namespace vl::app

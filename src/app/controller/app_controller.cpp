@@ -10,6 +10,7 @@
 #include <opencv2/videoio.hpp>
 
 #include "app/view/canvas.hpp"
+#include "app/view/code_reader.hpp"
 #include "app/view/inspector.hpp"
 #include "app/view/main_window.hpp"
 #include "app/view/nav_list.hpp"
@@ -55,6 +56,8 @@ AppController::AppController(QObject* parent) : QObject(parent), doc_(std::make_
     connect(w->inspector(), &Inspector::boxToolToggled, w->canvas(), &Canvas::setBoxTool);
     connect(w, &MainWindow::viewChosen, this, &AppController::setView);
     connect(w, &MainWindow::exportRequested, this, &AppController::exportPicture);
+    connect(w, &MainWindow::compareToggled, this, &AppController::setCompare);
+    connect(w, &MainWindow::codeRequested, this, &AppController::showCode);
     connect(w->timeline(), &Timeline::frameChosen, this, &AppController::setFrame);
     connect(w->canvas(), &Canvas::clicked, this, &AppController::click);
     connect(w->canvas(), &Canvas::boxDrawn, this, [this](QRectF r) {
@@ -207,7 +210,7 @@ void AppController::setParam(const QString& key, const QVariant& value) {
 void AppController::recompute(int delayMs) {
     const auto& s = doc_->current();
     if (!s.inputs) return;
-    runner_.submit(s.module.get(), s.inputs, s.params, delayMs);
+    runner_.submit(s.module.get(), s.inputs, s.params, doc_->compare() && !s.info.baseline.isEmpty(), delayMs);
 }
 
 void AppController::setView(int view) {
@@ -242,6 +245,20 @@ void AppController::exportPicture() {
                               s.info.id + QStringLiteral(".png");
     const QString path = QFileDialog::getSaveFileName(window_.get(), tr("Export picture"), suggested, tr("PNG (*.png)"));
     if (!path.isEmpty()) img.save(path);
+}
+
+void AppController::setCompare(bool on) {
+    doc_->setCompare(on);
+    window_->showOutput(true);
+    recompute(0);
+}
+
+void AppController::showCode() {
+    if (!codeReader_) codeReader_ = new CodeReader(window_.get());
+    const auto& info = doc_->current().info;
+    codeReader_->showTopic(info.title, info.sources);
+    codeReader_->show();
+    codeReader_->raise();
 }
 
 void AppController::syncInspector() { window_->inspector()->syncParams(doc_->current().params); }

@@ -91,10 +91,21 @@ struct Frame {
     std::vector<Stat> stats;  // per-frame numbers (shown under the global ones)
 };
 
+// One line of the "ours vs OpenCV" table: the same measurement for our implementation and for
+// the OpenCV baseline run on the same input. The inspector highlights the better value.
+struct Comparison {
+    QString metric;             // "Bad pixels (non-occluded)", "Run time"
+    double ours = 0, opencv = 0;
+    QString unit;               // " %", " px", " ms"
+    int decimals = 1;
+    bool lowerIsBetter = true;
+};
+
 struct Output {
     std::vector<Frame> frames;  // one frame for image topics, one per video frame otherwise
     std::vector<Stat> stats;
     std::vector<Series> series;
+    std::vector<Comparison> comparison;  // filled when RunContext::compare is set
     QString note;               // one line under the result, e.g. a warning ("only 6 matches")
 };
 using OutputPtr = std::shared_ptr<const Output>;
@@ -143,6 +154,7 @@ QRectF roiParam(const Params& p);  // empty when the user has not drawn one
 // ------------------------------------------------------------------ running
 struct RunContext {
     std::stop_token stop;
+    bool compare = false;  // also run the OpenCV baseline: add its views ("OpenCV · ...") and Output::comparison
     ProgressFn progress;                          // fraction + message
     std::function<void(OutputPtr)> partial;       // optional: show intermediate results (throttled by the runner)
     void check() const { checkStop(stop); }
@@ -159,6 +171,9 @@ public:
         InputKind input = InputKind::Image;
         int order = 0;    // position in the navigation, ascending
         QString defaultView;  // view shown first (by name), e.g. the result; empty = the first view
+        QString baseline;     // the OpenCV method compared against, e.g. "cv::StereoSGBM"; empty = none
+        QStringList sources;  // our implementation, repo-relative ("src/core/stereo/block_matching.cpp"),
+                              // shown by the code reader next to the picture
     };
 
     virtual ~Module() = default;

@@ -53,6 +53,8 @@ private:
     std::map<QString, ParamRow*> rows_;
     QWidget* statsBox_;
     QGridLayout* statsGrid_;
+    QWidget* compareBox_;
+    QGridLayout* compareGrid_;
     QVBoxLayout* seriesLayout_;
     QLabel* note_;
     QLabel* error_;

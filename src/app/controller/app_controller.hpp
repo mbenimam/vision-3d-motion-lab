@@ -12,6 +12,7 @@
 namespace vl::app {
 
 class MainWindow;
+class CodeReader;
 
 class AppController : public QObject {
     Q_OBJECT
@@ -32,6 +33,9 @@ public:
     void whenIdle(std::function<void()> fn);  // runs once, after the next completed result
     void recompute(int delayMs);
     void syncInspector();  // show the model's parameter values (after changes made outside the panel)
+    void setCompare(bool on);
+    void showCode();
+    CodeReader* codeReader() const { return codeReader_; }
 
 private:
     void chooseModule(int index);
@@ -46,6 +50,7 @@ private:
     std::function<void()> onIdle_;
     bool loading_ = false;
     QPointF lastClick_{-1, -1};
+    CodeReader* codeReader_ = nullptr;  // created on first use, owned by the window
 };
 
 }  // namespace vl::app

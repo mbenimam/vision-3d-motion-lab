@@ -8,6 +8,7 @@ namespace vl::app {
 
 Document::Document(std::vector<std::unique_ptr<Module>> modules, QObject* parent) : QObject(parent) {
     QSettings settings;
+    compare_ = settings.value(QStringLiteral("compare"), false).toBool();
     for (auto& m : modules) {
         ModuleState s;
         s.info = m->info();
@@ -137,6 +138,14 @@ void Document::setView(int view) {
     if (view == s.view) return;
     s.view = view;
     emit viewChanged(view);
+}
+
+void Document::setCompare(bool on) {
+    if (on == compare_) return;
+    compare_ = on;
+    QSettings().setValue(QStringLiteral("compare"), on);
+    for (auto& s : states_) s.output.reset();  // every result is stale now
+    emit paramsChanged();
 }
 
 void Document::setClickShapes(std::vector<Module::ClickShapes> shapes) {

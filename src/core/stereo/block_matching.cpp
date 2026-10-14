@@ -1,42 +1,153 @@
+// Local stereo by block matching. Course: "3D Vision and Motion", part 6.
+//
+// The method in four steps, one function each:
+//   1. costForDisparity  C(x, y, d) = cost of matching the window around left (x, y) with the window
+//                        around right (x − d, y), for every pixel, one disparity at a time
+//   2. winnerTakesAll    d*(x, y) = argmin_d C(x, y, d)
+//   3. subpixel          refine d* with the parabola through C(d*−1), C(d*), C(d*+1)
+//   4. leftRightCheck    keep d* only if matching right-to-left gives the same answer
+//
+// Window sums come from an integral image, so each cost is O(1) per pixel whatever the window
+// size, and the whole method costs O(W·H·D).
+
 #include "core/stereo/block_matching.hpp"
 
 #include <cmath>
 #include <limits>
 
-#include <opencv2/imgproc.hpp>
-
 #include "core/common/image.hpp"
 
 namespace vl::stereo {
+namespace {
+
+constexpr float kNoMatch = std::numeric_limits<float>::infinity();
+const float kNaN = std::numeric_limits<float>::quiet_NaN();
+
+// The integral image S(x, y) = Σ_{x' < x, y' < y} f(x', y'), one row and one column larger than f.
+// One pass: S(x+1, y+1) = f(x, y) + S(x, y+1) + S(x+1, y) − S(x, y).
+cv::Mat integralImage(const cv::Mat& f) {
+    cv::Mat S = cv::Mat::zeros(f.rows + 1, f.cols + 1, CV_64F);
+    for (int y = 0; y < f.rows; ++y)
+        for (int x = 0; x < f.cols; ++x)
+            S.at<double>(y + 1, x + 1) =
+                f.at<float>(y, x) + S.at<double>(y, x + 1) + S.at<double>(y + 1, x) - S.at<double>(y, x);
+    return S;
+}
+
+// The right image moved d columns to the right, so that column x holds right(x − d) and lines up
+// with left(x). The first d columns have no partner and stay 0 (they are excluded later).
+cv::Mat shiftedRight(const cv::Mat& right, int d) {
+    cv::Mat s = cv::Mat::zeros(right.size(), right.type());
+    if (d < right.cols) right.colRange(0, right.cols - d).copyTo(s.colRange(d, right.cols));
+    return s;
+}
+
+// Window sums of each image, computed once and reused for every disparity.
+struct WindowSums {
+    cv::Mat count, sumL, sumL2, sumR, sumR2;  // CV_32F, one value per pixel
+};
+
+}  // namespace
 
 cv::Mat boxSum(const cv::Mat& f, int r) {
     CV_Assert(f.type() == CV_32F && r >= 0);
-    cv::Mat ii;  // (H+1)x(W+1), ii(y, x) = sum of f over [0, y) x [0, x)
-    cv::integral(f, ii, CV_64F);
+    const cv::Mat S = integralImage(f);
     cv::Mat out(f.size(), CV_32F);
-    const int H = f.rows, W = f.cols;
-    for (int y = 0; y < H; ++y) {
-        const int y0 = std::max(0, y - r), y1 = std::min(H, y + r + 1);
-        const double* top = ii.ptr<double>(y0);
-        const double* bot = ii.ptr<double>(y1);
-        float* o = out.ptr<float>(y);
-        for (int x = 0; x < W; ++x) {
-            const int x0 = std::max(0, x - r), x1 = std::min(W, x + r + 1);
-            o[x] = static_cast<float>(bot[x1] - bot[x0] - top[x1] + top[x0]);
+    for (int y = 0; y < f.rows; ++y)
+        for (int x = 0; x < f.cols; ++x) {
+            // The window [x0, x1) × [y0, y1), clipped to the image: four corners of S give its sum.
+            const int x0 = std::max(0, x - r), x1 = std::min(f.cols, x + r + 1);
+            const int y0 = std::max(0, y - r), y1 = std::min(f.rows, y + r + 1);
+            out.at<float>(y, x) =
+                float(S.at<double>(y1, x1) - S.at<double>(y0, x1) - S.at<double>(y1, x0) + S.at<double>(y0, x0));
         }
-    }
     return out;
 }
 
 namespace {
 
-constexpr float kInf = std::numeric_limits<float>::infinity();
+// Step 1, for one disparity d: the cost of every left pixel against right(x − d).
+//   SAD   mean |L − R| over the window
+//   SSD   mean (L − R)² over the window
+//   ZNCC  1 − Σ(L − μL)(R − μR) / √(Σ(L − μL)² · Σ(R − μR)²), in [0, 2]; 0 for windows of the same shape
+cv::Mat costForDisparity(const cv::Mat& L, const cv::Mat& R, const WindowSums& w, int d, int r, Cost cost) {
+    const cv::Mat Rd = shiftedRight(R, d);
+    cv::Mat c(L.size(), CV_32F);
+    if (cost == Cost::SAD) {
+        c = boxSum(cv::abs(L - Rd), r) / w.count;
+    } else if (cost == Cost::SSD) {
+        const cv::Mat diff = L - Rd;
+        c = boxSum(diff.mul(diff), r) / w.count;
+    } else {
+        // Σ(L − μL)(R − μR) = ΣLR − ΣL·ΣR / n, and the variances likewise. The window sums of the
+        // shifted right image are the right image's own sums, shifted by d.
+        const cv::Mat sumLR = boxSum(L.mul(Rd), r);
+        const cv::Mat sumR = shiftedRight(w.sumR, d), sumR2 = shiftedRight(w.sumR2, d);
+        for (int y = 0; y < L.rows; ++y)
+            for (int x = 0; x < L.cols; ++x) {
+                const double n = w.count.at<float>(y, x);
+                const double sL = w.sumL.at<float>(y, x), sR = sumR.at<float>(y, x);
+                const double covariance = sumLR.at<float>(y, x) - sL * sR / n;
+                const double varL = w.sumL2.at<float>(y, x) - sL * sL / n;
+                const double varR = sumR2.at<float>(y, x) - sR * sR / n;
+                // A flat window has no variance, hence no shape to compare: guard the division.
+                c.at<float>(y, x) = float(1.0 - covariance / std::sqrt(std::max(varL, 1e-3) * std::max(varR, 1e-3)));
+            }
+    }
+    // Pixels whose window would reach past the left edge of the right image have no partner.
+    c.colRange(0, std::min(L.cols, d + r)).setTo(kNoMatch);
+    return c;
+}
 
-// Right image shifted so that column x holds right(x - d); columns x < d have no partner.
-cv::Mat shiftRight(const cv::Mat& r, int d) {
-    cv::Mat s(r.size(), r.type(), cv::Scalar(0));
-    if (d < r.cols) r.colRange(0, r.cols - d).copyTo(s.colRange(d, r.cols));
-    return s;
+// Step 2: for each left pixel, the disparity of least cost (−1 if no disparity has a partner).
+cv::Mat winnerTakesAll(const std::vector<cv::Mat>& volume, int minDisparity) {
+    const cv::Size size = volume.front().size();
+    cv::Mat best(size, CV_32S, cv::Scalar(-1));
+    for (int y = 0; y < size.height; ++y)
+        for (int x = 0; x < size.width; ++x) {
+            float bestCost = kNoMatch;
+            for (int k = 0; k < int(volume.size()); ++k) {
+                const float c = volume[size_t(k)].at<float>(y, x);
+                if (c < bestCost) {
+                    bestCost = c;
+                    best.at<int>(y, x) = minDisparity + k;
+                }
+            }
+        }
+    return best;
+}
+
+// Step 3: the parabola through (−1, c₋), (0, c₀), (+1, c₊) has its minimum at
+// t = (c₋ − c₊) / (2 (c₋ − 2c₀ + c₊)), a fraction of a pixel from the integer winner.
+float subpixelOffset(const std::vector<cv::Mat>& volume, int k, int y, int x) {
+    if (k <= 0 || k + 1 >= int(volume.size())) return 0.f;
+    const float cm = volume[size_t(k - 1)].at<float>(y, x);
+    const float c0 = volume[size_t(k)].at<float>(y, x);
+    const float cp = volume[size_t(k + 1)].at<float>(y, x);
+    const float curvature = cm - 2 * c0 + cp;
+    if (!std::isfinite(cm) || !std::isfinite(cp) || curvature <= 1e-6f) return 0.f;
+    return 0.5f * (cm - cp) / curvature;
+}
+
+// Step 4 needs the right-to-left answer. It comes from the same volume: right pixel xr at
+// disparity d is left pixel xr + d.
+cv::Mat rightToLeft(const std::vector<cv::Mat>& volume, int minDisparity) {
+    const cv::Size size = volume.front().size();
+    cv::Mat d(size, CV_32F, cv::Scalar(kNaN));
+    for (int y = 0; y < size.height; ++y)
+        for (int xr = 0; xr < size.width; ++xr) {
+            float bestCost = kNoMatch;
+            for (int k = 0; k < int(volume.size()); ++k) {
+                const int xl = xr + minDisparity + k;
+                if (xl >= size.width) break;
+                const float c = volume[size_t(k)].at<float>(y, xl);
+                if (c < bestCost) {
+                    bestCost = c;
+                    d.at<float>(y, xr) = float(minDisparity + k);
+                }
+            }
+        }
+    return d;
 }
 
 }  // namespace
@@ -45,114 +156,46 @@ BlockMatchResult blockMatch(const cv::Mat& left, const cv::Mat& right, const Blo
                             std::stop_token stop, const ProgressFn& progress) {
     CV_Assert(left.size() == right.size() && p.maxDisparity >= p.minDisparity && p.minDisparity >= 0);
     const cv::Mat L = toGrayF(left), R = toGrayF(right);
-    const int H = L.rows, W = L.cols, r = p.radius;
-    const int D = p.maxDisparity - p.minDisparity + 1;
+    const int r = p.radius, D = p.maxDisparity - p.minDisparity + 1;
+    const WindowSums w{boxSum(cv::Mat::ones(L.size(), CV_32F), r), boxSum(L, r), boxSum(L.mul(L), r), boxSum(R, r),
+                       boxSum(R.mul(R), r)};
 
-    // Window statistics of the left image, needed by ZNCC (mean and spread of each window).
-    const cv::Mat n = boxSum(cv::Mat::ones(L.size(), CV_32F), r);
-    cv::Mat sumL, sumL2, sumR, sumR2;
-    if (p.cost == Cost::ZNCC) {
-        sumL = boxSum(L, r);
-        sumL2 = boxSum(L.mul(L), r);
-        sumR = boxSum(R, r);
-        sumR2 = boxSum(R.mul(R), r);
-    }
-
-    std::vector<cv::Mat> volume(static_cast<size_t>(D));
+    // 1. The cost volume, one slice per disparity.
+    std::vector<cv::Mat> volume;
     for (int k = 0; k < D; ++k) {
         checkStop(stop);
         report(progress, 0.9 * k / D, "matching disparity " + std::to_string(p.minDisparity + k));
-        const int d = p.minDisparity + k;
-        const cv::Mat Rs = shiftRight(R, d);
-        cv::Mat c;
-        if (p.cost == Cost::SAD) {
-            c = boxSum(cv::abs(L - Rs), r) / n;
-        } else if (p.cost == Cost::SSD) {
-            const cv::Mat diff = L - Rs;
-            c = boxSum(diff.mul(diff), r) / n;
-        } else {
-            // ZNCC = cov(L, R) / (σL σR), cost = 1 - ZNCC in [0, 2]. Window stats of the shifted right image
-            // are the right image's stats shifted by d.
-            const cv::Mat sR = shiftRight(sumR, d), sR2 = shiftRight(sumR2, d);
-            const cv::Mat sLR = boxSum(L.mul(Rs), r);
-            c.create(L.size(), CV_32F);
-            for (int y = 0; y < H; ++y) {
-                const float *pn = n.ptr<float>(y), *pl = sumL.ptr<float>(y), *pl2 = sumL2.ptr<float>(y);
-                const float *pr = sR.ptr<float>(y), *pr2 = sR2.ptr<float>(y), *plr = sLR.ptr<float>(y);
-                float* pc = c.ptr<float>(y);
-                for (int x = 0; x < W; ++x) {
-                    const double cnt = pn[x];
-                    const double cov = pl[x] * 1.0 * pr[x] / cnt;
-                    const double vl = pl2[x] - pl[x] * 1.0 * pl[x] / cnt, vr = pr2[x] - pr[x] * 1.0 * pr[x] / cnt;
-                    const double den = std::sqrt(std::max(vl, 1e-3) * std::max(vr, 1e-3));
-                    pc[x] = static_cast<float>(1.0 - (plr[x] - cov) / den);
-                }
-            }
-        }
-        // No partner when the window would leave the right image.
-        if (d + r > 0) c.colRange(0, std::min(W, d + r)).setTo(kInf);
-        volume[static_cast<size_t>(k)] = c;
+        volume.push_back(costForDisparity(L, R, w, p.minDisparity + k, r, p.cost));
     }
 
+    // 2 and 3. Winner takes all, refined to a fraction of a pixel.
+    const cv::Mat best = winnerTakesAll(volume, p.minDisparity);
     BlockMatchResult res;
     res.minDisparity = p.minDisparity;
     res.disparity.create(L.size(), CV_32F);
-    res.rightDisparity.create(L.size(), CV_32F);
-    res.rejected = cv::Mat::zeros(L.size(), CV_8U);
-    cv::Mat bestK(L.size(), CV_32S);
+    for (int y = 0; y < L.rows; ++y)
+        for (int x = 0; x < L.cols; ++x) {
+            const int d = best.at<int>(y, x);
+            const float refine = p.subpixel && d >= 0 ? subpixelOffset(volume, d - p.minDisparity, y, x) : 0.f;
+            res.disparity.at<float>(y, x) = d < 0 ? kNaN : float(d) + refine;
+        }
 
-    // Winner takes all, in the left image, with a parabola for sub-pixel precision.
-    for (int y = 0; y < H; ++y) {
-        for (int x = 0; x < W; ++x) {
-            float best = kInf;
-            int bk = -1;
-            for (int k = 0; k < D; ++k) {
-                const float v = volume[static_cast<size_t>(k)].at<float>(y, x);
-                if (v < best) {
-                    best = v;
-                    bk = k;
-                }
-            }
-            bestK.at<int>(y, x) = bk;
-            float d = bk < 0 ? std::numeric_limits<float>::quiet_NaN() : float(p.minDisparity + bk);
-            if (p.subpixel && bk > 0 && bk < D - 1) {
-                const float c0 = volume[size_t(bk - 1)].at<float>(y, x), c2 = volume[size_t(bk + 1)].at<float>(y, x);
-                const float den = c0 - 2 * best + c2;
-                if (std::isfinite(c0) && std::isfinite(c2) && den > 1e-6f) d += 0.5f * (c0 - c2) / den;
-            }
-            res.disparity.at<float>(y, x) = d;
-        }
-    }
+    // 4. Left-right consistency: a left pixel and the right pixel it chose must choose each other.
     checkStop(stop);
-    // Right-to-left winner from the same volume: right pixel xr at disparity d is left pixel xr + d.
-    for (int y = 0; y < H; ++y)
-        for (int xr = 0; xr < W; ++xr) {
-            float best = kInf;
-            int bk = -1;
-            for (int k = 0; k < D; ++k) {
-                const int xl = xr + p.minDisparity + k;
-                if (xl >= W) break;
-                const float v = volume[static_cast<size_t>(k)].at<float>(y, xl);
-                if (v < best) {
-                    best = v;
-                    bk = k;
-                }
-            }
-            res.rightDisparity.at<float>(y, xr) = bk < 0 ? std::numeric_limits<float>::quiet_NaN() : float(p.minDisparity + bk);
-        }
-    if (p.leftRightCheck) {
-        for (int y = 0; y < H; ++y)
-            for (int x = 0; x < W; ++x) {
+    res.rightDisparity = rightToLeft(volume, p.minDisparity);
+    res.rejected = cv::Mat::zeros(L.size(), CV_8U);
+    if (p.leftRightCheck)
+        for (int y = 0; y < L.rows; ++y)
+            for (int x = 0; x < L.cols; ++x) {
                 const float d = res.disparity.at<float>(y, x);
                 const int xr = int(std::lround(float(x) - d));
-                const bool ok = std::isfinite(d) && xr >= 0 && xr < W &&
-                                std::abs(res.rightDisparity.at<float>(y, xr) - d) <= p.lrTolerance + 0.5f;
-                if (!ok) {
+                const bool consistent = std::isfinite(d) && xr >= 0 && xr < L.cols &&
+                                        std::abs(res.rightDisparity.at<float>(y, xr) - d) <= p.lrTolerance + 0.5f;
+                if (!consistent) {
                     res.rejected.at<uchar>(y, x) = 255;
-                    res.disparity.at<float>(y, x) = std::numeric_limits<float>::quiet_NaN();
+                    res.disparity.at<float>(y, x) = kNaN;
                 }
             }
-    }
     if (p.keepVolume) res.volume = std::move(volume);
     report(progress, 1.0, "done");
     return res;
@@ -164,7 +207,7 @@ double badPixelRate(const cv::Mat& disparity, const cv::Mat& truth, const cv::Ma
     for (int y = 0; y < truth.rows; ++y)
         for (int x = 0; x < truth.cols; ++x) {
             const float t = truth.at<float>(y, x);
-            if (t <= 0 || (!mask.empty() && mask.at<uchar>(y, x) == 0)) continue;
+            if (t <= 0 || (!mask.empty() && mask.at<uchar>(y, x) == 0)) continue;  // unknown or occluded
             ++total;
             const float d = disparity.at<float>(y, x);
             if (!std::isfinite(d) || std::abs(d - t) > threshold) ++bad;

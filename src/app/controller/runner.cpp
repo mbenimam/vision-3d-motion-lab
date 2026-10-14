@@ -16,8 +16,9 @@ Runner::~Runner() {
     QThreadPool::globalInstance()->waitForDone();
 }
 
-void Runner::submit(const Module* module, InputsPtr inputs, Params params, int delayMs) {
+void Runner::submit(const Module* module, InputsPtr inputs, Params params, bool compare, int delayMs) {
     module_ = module;
+    compare_ = compare;
     inputs_ = std::move(inputs);
     params_ = std::move(params);
     stop_.request_stop();  // the running job (if any) is now stale: let it stop early
@@ -52,6 +53,7 @@ void Runner::launch() {
 
     RunContext ctx;
     ctx.stop = stop;
+    ctx.compare = compare_;
     ctx.progress = [=](double f, const std::string& msg) {
         const qint64 now = clock->elapsed();
         if (now - lastProgress->load() < 60 && f < 1.0) return;

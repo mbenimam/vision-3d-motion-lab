@@ -90,3 +90,17 @@ QScrollBar::handle:vertical { background: #2c3546; border-radius: 3px; min-heigh
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page { background: none; height: 0; }
 
 QFileDialog, QMessageBox { background: #121722; }
+
+/* compare with OpenCV, and the code reader */
+QPushButton#compare { background: transparent; color: #b9c1cc; border: 1px solid #2c3546; border-radius: 6px; padding: 4px 12px; }
+QPushButton#compare:hover { border-color: #3a4558; color: #ffffff; }
+QPushButton#compare:checked { background: #13261c; color: #7ee2a4; border-color: #2f6b47; }
+#compareTable { background: #0f141d; border: 1px solid #222a37; border-radius: 6px; }
+#compareHead { color: #9aa4b2; font-size: 11px; font-weight: 700; }
+#winner { color: #7ee2a4; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; font-weight: 700; }
+#codeReader { background: #0e1117; }
+#codeFiles { background: #121722; border: none; border-right: 1px solid #222a37; padding: 8px; }
+#codeFiles::item { padding: 5px 8px; border-radius: 5px; color: #b9c1cc; }
+#codeFiles::item:selected { background: #1e2635; color: #ffffff; }
+#codePath { color: #9aa4b2; background: #0e1117; padding: 10px 14px; font-family: "JetBrains Mono", monospace; font-size: 12px; border-bottom: 1px solid #222a37; }
+QPlainTextEdit#code { background: #0b0e14; color: #d6dce4; border: none; selection-background-color: #2a2414; }

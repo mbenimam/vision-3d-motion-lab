@@ -19,6 +19,7 @@
 
 #include "app/controller/app_controller.hpp"
 #include "app/theme/theme.hpp"
+#include "app/view/code_reader.hpp"
 #include "app/view/main_window.hpp"
 
 int main(int argc, char* argv[]) {
@@ -42,7 +43,9 @@ int main(int argc, char* argv[]) {
     QCommandLineOption shot(QStringLiteral("screenshot"), QStringLiteral("Save the window to a PNG and quit."), QStringLiteral("png"));
     QCommandLineOption size(QStringLiteral("size"), QStringLiteral("Window size WxH."), QStringLiteral("WxH"));
     QCommandLineOption stats(QStringLiteral("stats"), QStringLiteral("Print the result's numbers and quit."));
-    cli.addOptions({list, module, sample, set, view, frame, click, roi, shot, size, stats});
+    QCommandLineOption compare(QStringLiteral("compare"), QStringLiteral("Also run the OpenCV baseline."));
+    QCommandLineOption code(QStringLiteral("code"), QStringLiteral("With --screenshot: capture the code reader."));
+    cli.addOptions({list, module, sample, set, view, frame, click, roi, shot, size, stats, compare, code});
     cli.process(app);
 
     // Automated runs start from the default parameters and leave the user's settings alone.
@@ -64,6 +67,7 @@ int main(int argc, char* argv[]) {
         const auto wh = cli.value(size).split(u'x');
         if (wh.size() == 2) controller.window()->resize(wh[0].toInt(), wh[1].toInt());
     }
+    if (cli.isSet(compare)) controller.document().setCompare(true);
     controller.start(cli.value(module));
 
     // Automation: apply the requested state step by step, each after the previous result is ready.
@@ -94,8 +98,11 @@ int main(int argc, char* argv[]) {
                 const auto xy = cli.value(click).split(u',');
                 if (xy.size() == 2) controller.click(QPointF(xy[0].toDouble(), xy[1].toDouble()));
             }
+            if (cli.isSet(code)) controller.showCode();
             QTimer::singleShot(150, [&, path] {
-                controller.window()->grab().save(path);
+                QWidget* target = cli.isSet(code) ? static_cast<QWidget*>(controller.codeReader())
+                                                  : static_cast<QWidget*>(controller.window());
+                target->grab().save(path);
                 std::printf("saved %s\n", qPrintable(path));
                 QApplication::quit();
             });
@@ -109,6 +116,13 @@ int main(int argc, char* argv[]) {
             if (s.output)
                 for (const auto& st : s.output->stats)
                     std::printf("  %-34s %s%s\n", qPrintable(st.label), qPrintable(st.value), st.emphasis ? "   <-" : "");
+            if (s.output && !s.output->comparison.empty()) {
+                std::printf("  %-34s %14s %14s\n", "ours vs OpenCV", "ours", "OpenCV");
+                for (const auto& c : s.output->comparison)
+                    std::printf("  %-34s %14s %14s\n", qPrintable(c.metric),
+                                qPrintable(vl::app::fmt(c.ours, c.decimals) + c.unit),
+                                qPrintable(vl::app::fmt(c.opencv, c.decimals) + c.unit));
+            }
             std::printf("  %-34s %s\n", "Run time", qPrintable(vl::app::fmtMs(s.lastRunMs)));
             QApplication::quit();
         });
