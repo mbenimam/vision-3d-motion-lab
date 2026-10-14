@@ -7,6 +7,8 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QShortcut>
 #include <QToolButton>
@@ -111,13 +113,24 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     tabsLayout_->setContentsMargins(0, 0, 0, 0);
     tabsLayout_->setSpacing(0);
     tabGroup_ = new QButtonGroup(this);
-    second->addWidget(tabs_);
-    second->addStretch(1);
+    // Many views (a topic compared with OpenCV has a dozen) scroll sideways instead of widening the window.
+    auto* tabScroll = new QScrollArea;
+    tabScroll->setObjectName(QStringLiteral("tabScroll"));
+    tabScroll->setWidget(tabs_);
+    tabScroll->setWidgetResizable(false);
+    tabScroll->setFrameShape(QFrame::NoFrame);
+    tabScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    tabScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    tabScroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    tabScroll->setFixedHeight(40);
+    tabScroll_ = tabScroll;
+    second->addWidget(tabScroll, 1);
     busyLabel_ = new QLabel;
     busyLabel_->setObjectName(QStringLiteral("busy"));
     busyLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);  // long messages never push the layout
     busyLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    second->addWidget(busyLabel_, 1);
+    busyLabel_->setMaximumWidth(260);
+    second->addWidget(busyLabel_);
     // Our implementation is the topic; OpenCV's is the baseline it is measured against.
     compare_ = new QPushButton(tr("Compare with OpenCV"));
     compare_->setObjectName(QStringLiteral("compare"));
@@ -206,7 +219,7 @@ void MainWindow::rebuildViewTabs() {
     }
     const auto& s = doc_.current();
     if (!s.output || s.output->frames.empty()) {
-        tabs_->hide();
+        tabScroll_->hide();
         return;
     }
     const auto& views = s.output->frames.front().views;
@@ -220,7 +233,9 @@ void MainWindow::rebuildViewTabs() {
         tabsLayout_->addWidget(b);
     }
     if (auto* b = tabGroup_->button(s.view)) b->setChecked(true);
-    tabs_->setVisible(views.size() > 1);
+    tabs_->adjustSize();
+    tabScroll_->setVisible(views.size() > 1);
+    if (auto* b = tabGroup_->button(s.view)) static_cast<QScrollArea*>(tabScroll_)->ensureWidgetVisible(b);
 }
 
 void MainWindow::showOutput(bool keepZoom) {
@@ -231,8 +246,10 @@ void MainWindow::showOutput(bool keepZoom) {
     const int viewCount = s.output && !s.output->frames.empty() ? int(s.output->frames.front().views.size()) : 0;
     if (tabCount != viewCount || (viewCount > 0 && tabGroup_->button(0)->text() != s.output->frames.front().views[0].name))
         rebuildViewTabs();
-    else if (auto* b = tabGroup_->button(s.view))
+    else if (auto* b = tabGroup_->button(s.view)) {
         b->setChecked(true);
+        static_cast<QScrollArea*>(tabScroll_)->ensureWidgetVisible(b);
+    }
 
     timeline_->setVisible(video);
     if (!s.output || s.output->frames.empty()) {

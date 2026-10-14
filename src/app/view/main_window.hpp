@@ -58,6 +58,7 @@ private:
     QLabel* crumb_;
     QLabel* title_;
     QWidget* tabs_;
+    QWidget* tabScroll_;
     QHBoxLayout* tabsLayout_;
     QButtonGroup* tabGroup_;
     QToolButton* fit_;

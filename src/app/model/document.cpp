@@ -86,7 +86,9 @@ void Document::setInputs(InputsPtr inputs) {
     s.error.clear();
     s.frame = 0;
     s.clickShapes.clear();
-    s.params.remove(QStringLiteral("roi"));  // a box drawn on other pictures means nothing here
+    // A box or corners drawn on other pictures mean nothing here.
+    s.params.remove(QStringLiteral("roi"));
+    s.params.remove(QStringLiteral("handles"));
     emit inputsChanged();
     emit outputChanged();
 }

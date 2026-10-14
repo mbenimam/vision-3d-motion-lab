@@ -106,7 +106,14 @@ QPlainTextEdit#code { background: #0b0e14; color: #d6dce4; border: none; selecti
 
 /* keyboard focus: a visible amber ring on every control that takes focus (Tab navigation) */
 QPushButton:focus, QToolButton:focus, QComboBox:focus { border: 1px solid #ffb000; }
-QSlider:focus::handle:horizontal { background: #ffcf66; border: 2px solid #ffb000; }
+QSlider::handle:horizontal:focus { background: #ffcf66; }
 QCheckBox#toggle:focus { color: #ffffff; }
 #nav:focus { border: none; }
 #nav::item:focus { outline: none; }
+
+/* the view tabs scroll sideways when there are many: a thin bar under them */
+#tabScroll { background: transparent; }
+#tabScroll > QWidget > QWidget { background: transparent; }
+#tabScroll QScrollBar:horizontal { height: 4px; background: transparent; margin: 0; }
+#tabScroll QScrollBar::handle:horizontal { background: #2c3546; border-radius: 2px; min-width: 30px; }
+#tabScroll QScrollBar::add-line:horizontal, #tabScroll QScrollBar::sub-line:horizontal { width: 0; }
