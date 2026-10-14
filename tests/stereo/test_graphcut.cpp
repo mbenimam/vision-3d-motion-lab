@@ -31,6 +31,19 @@ cv::Mat randomImage(std::mt19937& rng, int W, int H) {
     return img;
 }
 
+// A right image that really matches `left` at disparity 1 (plus noise), so that configurations with
+// many active assignments are the cheap ones and every energy term matters.
+cv::Mat matchingRight(std::mt19937& rng, const cv::Mat& left) {
+    std::uniform_int_distribution<int> noise(-6, 6);
+    cv::Mat right(left.size(), left.type());
+    for (int y = 0; y < left.rows; ++y)
+        for (int x = 0; x < left.cols; ++x)
+            for (int c = 0; c < 3; ++c)
+                right.at<cv::Vec3b>(y, x)[c] =
+                    cv::saturate_cast<uchar>(left.at<cv::Vec3b>(y, std::min(x + 1, left.cols - 1))[c] + noise(rng));
+    return right;
+}
+
 // A random unique configuration: each left pixel occluded or at a disparity whose right pixel is free.
 cv::Mat randomUnique(std::mt19937& rng, int W, int H, int maxD) {
     cv::Mat d(H, W, CV_32F, cv::Scalar(kNaN));
@@ -75,14 +88,15 @@ double bruteForceExpansion(const cv::Mat& L, const cv::Mat& R, const cv::Mat& in
 
 TEST(GraphCutStereo, ExpansionMoveIsTheExactOptimumOfItsMoveSpace) {
     std::mt19937 rng(5);
-    for (int trial = 0; trial < 12; ++trial) {
+    for (int trial = 0; trial < 24; ++trial) {
         const int W = 5, H = 2, maxD = 2;
-        const cv::Mat L = randomImage(rng, W, H), R = randomImage(rng, W, H);
+        const cv::Mat L = randomImage(rng, W, H);
+        const cv::Mat R = trial % 2 ? randomImage(rng, W, H) : matchingRight(rng, L);
         GraphCutParams p;
         p.maxDisparity = maxD;
         p.cost = trial % 2 ? DataCost::Squared : DataCost::Absolute;
         p.birchfieldTomasi = trial % 3 != 0;
-        p.lambda = 4 + trial;  // make smoothness, data and occlusion compete
+        p.lambda = 4 + trial % 12;  // make smoothness, data and occlusion compete
         p.occlusionCost = 6 + 2 * (trial % 4);
         const cv::Mat init = randomUnique(rng, W, H, maxD);
         for (int alpha = 0; alpha <= maxD; ++alpha) {
@@ -101,7 +115,8 @@ TEST(GraphCutStereo, PottsExpansionMoveIsTheExactOptimumOfItsMoveSpace) {
     std::mt19937 rng(9);
     for (int trial = 0; trial < 8; ++trial) {
         const int W = 6, H = 2, maxD = 3;
-        const cv::Mat L = randomImage(rng, W, H), R = randomImage(rng, W, H);
+        const cv::Mat L = randomImage(rng, W, H);
+        const cv::Mat R = trial % 2 ? randomImage(rng, W, H) : matchingRight(rng, L);
         GraphCutParams p;
         p.maxDisparity = maxD;
         p.modelOcclusions = false;
@@ -167,7 +182,7 @@ TEST(GraphCutStereo, EnergyNeverIncreasesAndMatchesTheReturnedMap) {
     for (size_t k = 1; k < res.energy.size(); ++k) ASSERT_LE(res.energy[k], res.energy[k - 1]) << "move " << k;
     EXPECT_LT(res.energy.back(), 0.2 * res.energy.front());
     EXPECT_NEAR(graphCutEnergy(sc.s.left, sc.s.right, res.disparity, p), res.energy.back(), 1e-6);
-    EXPECT_NEAR(res.dataEnergy + res.occlusionEnergy + res.smoothEnergy, res.energy.back(), 1e-6);
+    EXPECT_NEAR(res.terms.total(), res.energy.back(), 1e-6);
 }
 
 TEST(GraphCutStereo, BeatsBlockMatchingOnTheLayeredScene) {
@@ -200,7 +215,7 @@ TEST(GraphCutStereo, PottsModeLabelsEveryPixel) {
     p.maxIterations = 2;
     const auto gc = graphCutStereo(sc.s.left, sc.s.right, p);
     EXPECT_EQ(cv::countNonZero(gc.occluded), 0);
-    EXPECT_EQ(gc.occlusionEnergy, 0);
+    EXPECT_EQ(gc.terms.occlusion, 0);
     for (size_t k = 1; k < gc.energy.size(); ++k) ASSERT_LE(gc.energy[k], gc.energy[k - 1]);
 }
 

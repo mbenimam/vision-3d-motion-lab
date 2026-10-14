@@ -17,6 +17,7 @@ struct Disparity {
 Disparity blockMatching(const cv::Mat& left, const cv::Mat& right, int maxDisparity, int radius);
 
 // cv::StereoSGBM: semi-global matching (Hirschmüller 2008), a smoothness term along 8 paths.
+// The images are padded on the left so that it answers near the left edge too.
 Disparity semiGlobal(const cv::Mat& left, const cv::Mat& right, int maxDisparity, int radius);
 
 }  // namespace vl::stereo::opencv

@@ -1,6 +1,7 @@
 // Topic: global stereo with occlusions by graph cuts (Kolmogorov–Zabih, α-expansion on assignments).
 
 #include <cmath>
+#include <string>
 
 #include "app/module.hpp"
 #include "app/modules/stereo/stereo_samples.hpp"
@@ -27,7 +28,10 @@ public:
                 QStringLiteral("on <i>Tsukuba</i>, open <i>Occlusions</i> and turn <i>Model occlusions</i> off: the "
                                "blue strips beside each object are hidden in the right image, yet now get a depth. Then "
                                "set λ to 0.5 and see the noise come back."),
-                InputKind::ImagePair, 320, QStringLiteral("Disparity")};
+                InputKind::ImagePair, 320, QStringLiteral("Disparity"), QStringLiteral("cv::StereoSGBM"),
+                {QStringLiteral("src/core/stereo/graphcut_stereo.hpp"), QStringLiteral("src/core/stereo/graphcut_stereo.cpp"),
+                 QStringLiteral("src/core/stereo/graphcut_energy.hpp"), QStringLiteral("src/core/stereo/graphcut_energy.cpp"),
+                 QStringLiteral("src/core/stereo/maxflow.hpp"), QStringLiteral("src/core/stereo/maxflow.cpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -64,7 +68,40 @@ public:
     Output compute(const Inputs& in, const Params& p, const RunContext& ctx) const override {
         const int factor = 1 << intParam(p, "scale");
         const sv::Working w = sv::prepare(in, factor);
+        const stereo::GraphCutParams gp = graphCutParams(p, w);
 
+        Partial partial;
+        auto progress = [&](double f, const std::string& m) { if (ctx.progress) ctx.progress(0.95 * f, m); };
+        const vl::Stopwatch clock;
+        const auto res = stereo::graphCutStereo(w.left, w.right, gp, ctx.stop, progress, partialPictures(w, ctx, partial));
+        const double oursMs = clock.ms();
+
+        Output out;
+        out.frames.push_back(frame(w, res.disparity));
+        addStats(w, gp, res, ctx, out);
+        if (factor > 1)
+            out.note = QStringLiteral("Computed at %1 resolution (%2 × %3 px); choose Full for the finest map, about %4× "
+                                      "slower.")
+                           .arg(factor == 2 ? QStringLiteral("half") : QStringLiteral("quarter"))
+                           .arg(w.left.cols)
+                           .arg(w.left.rows)
+                           .arg(factor == 2 ? 8 : 60);
+        // SGBM with a 3×3 window: the closest OpenCV counterpart of a pixel-wise data term plus a
+        // smoothness term, and its best setting on these pairs.
+        if (ctx.compare)
+            sv::compareWithSemiGlobal(w, {res.disparity, oursMs, 1, gp.modelOcclusions, false}, out.frames.front(), out);
+        return out;
+    }
+
+    std::vector<ClickShapes> onClick(const Output& out, int, int view, QPointF px) const override {
+        if (out.frames.empty() || view == kRight) return {};
+        const auto& f = out.frames.front();
+        return sv::matchClick(f.views[kDisparity].data, kRight, int(f.views.size()), px,
+                              QStringLiteral("occluded: no match in this image"));
+    }
+
+private:
+    static stereo::GraphCutParams graphCutParams(const Params& p, const sv::Working& w) {
         stereo::GraphCutParams gp;
         gp.maxDisparity = w.maxDisparity;
         gp.lambda = realParam(p, "lambda");
@@ -74,28 +111,31 @@ public:
         gp.birchfieldTomasi = toggleParam(p, "bt");
         gp.adaptiveLambda = toggleParam(p, "adaptive");
         gp.maxIterations = intParam(p, "iterations");
+        return gp;
+    }
 
-        // Partial pictures while the expansions run, at most every 120 ms.
+    // Partial pictures while the expansions run, at most every 120 ms, with the energy so far.
+    struct Partial {
         vl::Stopwatch clock;
-        double lastPartial = -1e9;
+        double lastMs = -1e9;
         std::vector<double> energies;
-        auto observer = [&](const stereo::GraphCutStep& st) {
-            energies.push_back(st.energy);
-            if (!ctx.partial || clock.ms() - lastPartial < 120) return;
-            lastPartial = clock.ms();
+    };
+    static stereo::GraphCutObserver partialPictures(const sv::Working& w, const RunContext& ctx, Partial& state) {
+        return [&w, &ctx, &state](const stereo::GraphCutStep& st) {
+            state.energies.push_back(st.energy);
+            if (!ctx.partial || state.clock.ms() - state.lastMs < 120) return;
+            state.lastMs = state.clock.ms();
             auto out = std::make_shared<Output>();
             out->frames.push_back(frame(w, *st.disparity));
             out->stats.push_back({QStringLiteral("Pass %1, expanding d = %2").arg(st.iteration).arg(st.alpha),
                                   QStringLiteral("energy %1").arg(fmt(st.energy, 0)), true});
-            out->series.push_back({QStringLiteral("Energy after each expansion move"), energies});
+            out->series.push_back({QStringLiteral("Energy after each expansion move"), state.energies});
             ctx.partial(out);
         };
-        const auto res = stereo::graphCutStereo(w.left, w.right, gp, ctx.stop,
-                                                [&](double f, const std::string& m) { if (ctx.progress) ctx.progress(0.95 * f, m); },
-                                                observer);
+    }
 
-        Output out;
-        out.frames.push_back(frame(w, res.disparity));
+    static void addStats(const sv::Working& w, const stereo::GraphCutParams& gp, const stereo::GraphCutResult& res,
+                         const RunContext& ctx, Output& out) {
         if (!w.truth.empty()) {
             out.stats.push_back({QStringLiteral("Bad pixels (non-occluded)"),
                                  fmt(100 * sv::badRate(res.disparity, w)) + QStringLiteral(" %"), true});
@@ -117,30 +157,13 @@ public:
                                  .arg(res.converged ? QStringLiteral(" · converged") : QString())});
         if (gp.modelOcclusions)
             out.stats.push_back({QStringLiteral("Occluded, left · right"),
-                                 fmt(100.0 * cv::countNonZero(res.occluded) / double(res.occluded.total())) +
-                                     QStringLiteral(" % · ") +
+                                 fmt(100.0 - sv::answeredPercent(res.disparity)) + QStringLiteral(" % · ") +
                                      fmt(100.0 * cv::countNonZero(res.occludedRight) / double(res.occludedRight.total())) +
                                      QStringLiteral(" %")});
         out.series.push_back({QStringLiteral("Energy after each expansion move"),
                               std::vector<double>(res.energy.begin() + 1, res.energy.end())});
-        if (factor > 1)
-            out.note = QStringLiteral("Computed at %1 resolution (%2 × %3 px); choose Full for the finest map, about %4× "
-                                      "slower.")
-                           .arg(factor == 2 ? QStringLiteral("half") : QStringLiteral("quarter"))
-                           .arg(w.left.cols)
-                           .arg(w.left.rows)
-                           .arg(factor == 2 ? 8 : 60);
-        return out;
     }
 
-    std::vector<ClickShapes> onClick(const Output& out, int, int view, QPointF px) const override {
-        if (out.frames.empty() || view == kRight) return {};
-        const auto& f = out.frames.front();
-        return sv::matchClick(f.views[kDisparity].data, kRight, int(f.views.size()), px,
-                              QStringLiteral("occluded: no match in this image"));
-    }
-
-private:
     static Frame frame(const sv::Working& w, const cv::Mat& disparity) {
         Frame f;
         View left{QStringLiteral("Left"), toQImage(w.left)};

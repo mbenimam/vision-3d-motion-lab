@@ -28,7 +28,9 @@ public:
                                "correlates well: textureless areas, occlusions, depth edges."),
                 QStringLiteral("on <i>Tsukuba</i>, raise the growth floor to 0.8 and watch the lamp and the "
                                "textureless wall stay unreached, then set seed spacing to 1 as in the course."),
-                InputKind::ImagePair, 310, QStringLiteral("Growth")};
+                InputKind::ImagePair, 310, QStringLiteral("Growth"), QStringLiteral("cv::StereoSGBM"),
+                {QStringLiteral("src/core/stereo/seeds.hpp"), QStringLiteral("src/core/stereo/seeds.cpp"),
+                 QStringLiteral("src/core/stereo/block_matching.hpp"), QStringLiteral("src/core/stereo/block_matching.cpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -53,42 +55,18 @@ public:
 
     Output compute(const Inputs& in, const Params& p, const RunContext& ctx) const override {
         const sv::Working w = sv::prepare(in, 1);
-        stereo::SeedParams sp;
-        sp.maxDisparity = w.maxDisparity;
-        sp.seedScore = realParam(p, "seed");
-        sp.seedSpacing = intParam(p, "spacing");
-        sp.stopScore = realParam(p, "stop");
-        sp.radius = intParam(p, "radius");
-        sp.leftRightCheck = toggleParam(p, "lr");
-
-        // Partial pictures as the region grows; the seeds are the zeros of the order map.
-        auto observer = [&](const cv::Mat& disparity, const cv::Mat& order, int reached) {
-            if (!ctx.partial) return;
-            auto out = std::make_shared<Output>();
-            out->frames.push_back(frame(w, disparity, order, seedsFrom(order)));
-            out->stats.push_back({QStringLiteral("Reached so far"),
-                                  fmt(100.0 * reached / double(order.total())) + QStringLiteral(" %"), true});
-            ctx.partial(out);
-        };
+        const stereo::SeedParams sp = seedParams(p, w);
         const int every = std::max(1, int(w.left.total() / 20));  // a picture every 5 % of the image
-        const auto res = stereo::propagateSeeds(w.left, w.right, sp, ctx.stop, ctx.progress, observer, every);
+        const vl::Stopwatch clock;
+        const auto res = stereo::propagateSeeds(w.left, w.right, sp, ctx.stop, ctx.progress, partialPictures(w, ctx), every);
+        const double oursMs = clock.ms();
 
         Output out;
         out.frames.push_back(frame(w, res.disparity, res.order, res.seeds));
-        const cv::Mat reached = res.order >= 0;
-        if (!w.truth.empty()) {
-            out.stats.push_back({QStringLiteral("Bad pixels (non-occluded)"),
-                                 fmt(100 * sv::badRate(res.disparity, w)) + QStringLiteral(" %"), true});
-            sv::Working onlyReached = w;
-            onlyReached.visible = w.visible & reached;
-            out.stats.push_back({QStringLiteral("Errors among reached pixels"),
-                                 fmt(100 * sv::badRate(res.disparity, onlyReached)) + QStringLiteral(" %")});
-        }
-        out.stats.push_back({QStringLiteral("Pixels reached"),
-                             fmt(100.0 * cv::countNonZero(reached) / double(reached.total())) + QStringLiteral(" %")});
-        out.stats.push_back({QStringLiteral("Seeds"), QString::number(res.seeds.size())});
-        if (res.seeds.empty())
-            out.note = QStringLiteral("No pixel reaches the seed threshold: lower it.");
+        addStats(w, res, out);
+        // SGBM with a 3×3 window, its best setting on these pairs (larger windows only blur its depth edges).
+        if (ctx.compare)
+            sv::compareWithSemiGlobal(w, {res.disparity, oursMs, 1, false, true}, out.frames.front(), out);
         return out;
     }
 
@@ -100,6 +78,41 @@ public:
     }
 
 private:
+    static stereo::SeedParams seedParams(const Params& p, const sv::Working& w) {
+        stereo::SeedParams sp;
+        sp.maxDisparity = w.maxDisparity;
+        sp.seedScore = realParam(p, "seed");
+        sp.seedSpacing = intParam(p, "spacing");
+        sp.stopScore = realParam(p, "stop");
+        sp.radius = intParam(p, "radius");
+        sp.leftRightCheck = toggleParam(p, "lr");
+        return sp;
+    }
+
+    // Partial pictures as the region grows; the seeds are the zeros of the order map.
+    static stereo::SeedObserver partialPictures(const sv::Working& w, const RunContext& ctx) {
+        if (!ctx.partial) return {};
+        return [&w, &ctx](const cv::Mat& disparity, const cv::Mat& order, int reached) {
+            auto out = std::make_shared<Output>();
+            out->frames.push_back(frame(w, disparity, order, seedsFrom(order)));
+            out->stats.push_back({QStringLiteral("Reached so far"),
+                                  fmt(100.0 * reached / double(order.total())) + QStringLiteral(" %"), true});
+            ctx.partial(out);
+        };
+    }
+
+    static void addStats(const sv::Working& w, const stereo::SeedResult& res, Output& out) {
+        if (!w.truth.empty()) {
+            out.stats.push_back({QStringLiteral("Bad pixels (non-occluded)"),
+                                 fmt(100 * sv::badRate(res.disparity, w)) + QStringLiteral(" %"), true});
+            out.stats.push_back({QStringLiteral("Errors among reached pixels"),
+                                 fmt(100 * sv::answeredBadRate(res.disparity, w)) + QStringLiteral(" %")});
+        }
+        out.stats.push_back({QStringLiteral("Pixels reached"), fmt(sv::answeredPercent(res.disparity)) + QStringLiteral(" %")});
+        out.stats.push_back({QStringLiteral("Seeds"), QString::number(res.seeds.size())});
+        if (res.seeds.empty()) out.note = QStringLiteral("No pixel reaches the seed threshold: lower it.");
+    }
+
     static std::vector<cv::Point> seedsFrom(const cv::Mat& order) {
         std::vector<cv::Point> s;
         for (int y = 0; y < order.rows; ++y)
@@ -108,41 +121,47 @@ private:
         return s;
     }
 
-    static Frame frame(const sv::Working& w, const cv::Mat& disparity, const cv::Mat& order,
-                       const std::vector<cv::Point>& seeds) {
-        Frame f;
-        View disp = sv::disparityView(QStringLiteral("Disparity"), disparity, w, QStringLiteral("not reached"));
-        View left{QStringLiteral("Left"), toQImage(w.left), {}, disp.probe};
-        View right{QStringLiteral("Right"), toQImage(w.right)};
-
-        // Seeds as small dots over the dimmed left image (painted: there can be thousands).
-        cv::Mat seedImg = sv::dimmed(w.left);
+    // Seeds as small dots over the dimmed left image (painted: there can be thousands).
+    static View seedView(const sv::Working& w, const std::vector<cv::Point>& seeds) {
+        cv::Mat img = sv::dimmed(w.left);
         const int dot = seeds.size() > 5000 ? 0 : 1;
         for (const auto& s : seeds)
-            cv::rectangle(seedImg, cv::Rect(s.x - dot, s.y - dot, 2 * dot + 1, 2 * dot + 1), cv::Scalar(0x00, 0xb0, 0xff), cv::FILLED);
-        View seedView{QStringLiteral("Seeds"), toQImage(seedImg), {}, disp.probe};
-        seedView.shapes.push_back(LabelShape{QPointF(6, 6), QStringLiteral("%1 seeds").arg(seeds.size())});
+            cv::rectangle(img, cv::Rect(s.x - dot, s.y - dot, 2 * dot + 1, 2 * dot + 1), cv::Scalar(0x00, 0xb0, 0xff), cv::FILLED);
+        View v{QStringLiteral("Seeds"), toQImage(img)};
+        v.shapes.push_back(LabelShape{QPointF(6, 6), QStringLiteral("%1 seeds").arg(seeds.size())});
+        return v;
+    }
 
-        // Order of arrival, normalised to [0, 1]: seeds at 0, the last pixel reached at 1.
+    // Order of arrival, normalised to [0, 1]: seeds at 0, the last pixel reached at 1.
+    static View growthView(const cv::Mat& order) {
         double last = 1;
         cv::minMaxLoc(order, nullptr, &last);
         cv::Mat t;
         order.convertTo(t, CV_32F, 1.0 / std::max(1.0, last));
-        View growth{QStringLiteral("Growth"), toQImage(vl::colorize(t, 0, 1, order >= 0)), {}, {}, order,
-                    Legend{QStringLiteral("order of arrival · black: not reached"), 0, 1, QStringLiteral("seeds"),
-                           QStringLiteral("last")}};
-        const cv::Mat o = order;
+        View v{QStringLiteral("Growth"), toQImage(vl::colorize(t, 0, 1, order >= 0)), {}, {}, order,
+               Legend{QStringLiteral("order of arrival · black: not reached"), 0, 1, QStringLiteral("seeds"),
+                      QStringLiteral("last")}};
         const int n = int(last);
-        growth.probe = [o, n](QPoint q) {
-            if (q.x() < 0 || q.y() < 0 || q.x() >= o.cols || q.y() >= o.rows) return QString();
-            const int k = o.at<int>(q.y(), q.x());
+        v.probe = [order, n](QPoint q) {
+            if (q.x() < 0 || q.y() < 0 || q.x() >= order.cols || q.y() >= order.rows) return QString();
+            const int k = order.at<int>(q.y(), q.x());
             if (k < 0) return QStringLiteral("not reached");
             if (k == 0) return QStringLiteral("seed");
             return QStringLiteral("reached %1 of %2").arg(k).arg(n);
         };
+        return v;
+    }
 
-        f.views = {left, right, seedView, growth, disp};
-        if (!w.truth.empty()) f.views.push_back(View{QStringLiteral("Errors"), toQImage(sv::errorImage(disparity, w)), {}, disp.probe, disparity});
+    static Frame frame(const sv::Working& w, const cv::Mat& disparity, const cv::Mat& order,
+                       const std::vector<cv::Point>& seeds) {
+        View disp = sv::disparityView(QStringLiteral("Disparity"), disparity, w, QStringLiteral("not reached"));
+        View left{QStringLiteral("Left"), toQImage(w.left), {}, disp.probe};
+        View seedsShown = seedView(w, seeds);
+        seedsShown.probe = disp.probe;
+        Frame f;
+        f.views = {left, View{QStringLiteral("Right"), toQImage(w.right)}, seedsShown, growthView(order), disp};
+        if (!w.truth.empty())
+            f.views.push_back(View{QStringLiteral("Errors"), toQImage(sv::errorImage(disparity, w)), {}, disp.probe, disparity});
         return f;
     }
 };

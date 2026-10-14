@@ -1,3 +1,33 @@
+// Maximum flow / minimum cut, Boykov–Kolmogorov algorithm. Course: "3D Vision and Motion", part 7.
+//
+// Ford–Fulkerson pushes flow along augmenting paths s → … → t until none is left. Edmonds–Karp finds
+// each path by a fresh breadth-first search, which on an image-sized grid means visiting most of the
+// graph for every path. Boykov–Kolmogorov keeps two search trees, S rooted at the source and T at
+// the sink, and reuses them from one path to the next:
+//
+//   0. initialiseTrees  every node with a terminal edge hangs from its terminal and is active
+//   1. grow             active nodes claim free neighbours through non-saturated arcs, until an
+//                       arc joins S to T: the "bridge" in the middle of an augmenting path
+//   2. augment          push the path's bottleneck Δ along it; arcs it saturates cut their child
+//                       off from the tree, which becomes an "orphan"
+//   3. adopt            each orphan looks for a new parent in its own tree that still leads to the
+//                       terminal (findNewParent); if there is none, it becomes free (freeNode) and
+//                       its children become orphans in turn
+//   repeat 1–3 until growth finds no bridge: the flow is maximum and T is the sink side of a min cut.
+//
+// Invariants, true after every stage 3:
+//   (I1) S and T are disjoint trees. A node is in S, in T, or free.
+//   (I2) Every tree arc can still carry flow in the tree's direction: for p in S with parent r,
+//        c_f(r → p) > 0; for p in T with parent r, c_f(p → r) > 0. A node whose parent is a terminal
+//        has c_f(s → p) > 0 (in S) or c_f(p → t) > 0 (in T). So every tree node has a non-saturated
+//        path to its terminal.
+//   (I3) A tree node that is not active has no free neighbour it could reach through a
+//        non-saturated arc: only active nodes need to be scanned by growth.
+//
+// Cost: no polynomial bound better than O(V·E²·|C|) (|C| the cut capacity), but on the grid graphs
+// of vision the trees are rebuilt only locally after each augmentation and the run time is close to
+// linear in the number of nodes (the paper's experiments, and ours: a 200k-node move in ~0.1 s).
+
 #include "core/stereo/maxflow.hpp"
 
 #include <algorithm>
@@ -5,270 +35,272 @@
 
 namespace vl::stereo {
 
-template <typename Cap>
-void MaxFlow<Cap>::reserve(int nodes, int edges) {
-    nodes_.reserve(static_cast<std::size_t>(nodes));
-    arcs_.reserve(2 * static_cast<std::size_t>(edges));
+void MaxFlow::reserve(int nodes, int edges) {
+    nodes_.reserve(std::size_t(nodes));
+    arcs_.reserve(2 * std::size_t(edges));
 }
 
-template <typename Cap>
-void MaxFlow<Cap>::clear() {
+void MaxFlow::clear() {
     nodes_.clear();
     arcs_.clear();
+    active_.clear();
     orphans_.clear();
-    orphanHead_ = 0;
-    activeFirst_ = activeLast_ = kNone;
     flow_ = 0;
     augmentations_ = 0;
 }
 
-template <typename Cap>
-int MaxFlow<Cap>::addNode() {
+int MaxFlow::addNode() {
     nodes_.emplace_back();
-    return static_cast<int>(nodes_.size()) - 1;
+    return int(nodes_.size()) - 1;
 }
 
-template <typename Cap>
-void MaxFlow<Cap>::addTweights(int i, Cap capSource, Cap capSink) {
-    Node& n = nodes_[static_cast<std::size_t>(i)];
-    if (n.trCap > 0)
-        capSource += n.trCap;
-    else
-        capSink -= n.trCap;
-    flow_ += std::min(capSource, capSink);  // paid whichever side i ends on
-    n.trCap = capSource - capSink;
+void MaxFlow::addTerminalEdges(int p, double fromSource, double toSink) {
+    Node& n = node(p);
+    const double s = n.fromSource + fromSource, t = n.toSink + toSink;
+    const double common = std::min(s, t);  // paid whichever side p ends on
+    flow_ += common;
+    n.fromSource = s - common;
+    n.toSink = t - common;
 }
 
-template <typename Cap>
-void MaxFlow<Cap>::addEdge(int i, int j, Cap cap, Cap revCap) {
-    const int a = static_cast<int>(arcs_.size());
-    Node& ni = nodes_[static_cast<std::size_t>(i)];
-    Node& nj = nodes_[static_cast<std::size_t>(j)];
-    arcs_.push_back({j, ni.first, cap});
-    ni.first = a;
-    arcs_.push_back({i, nj.first, revCap});
-    nj.first = a + 1;
+void MaxFlow::addEdge(int p, int q, double capacity, double reverseCapacity) {
+    const int a = int(arcs_.size());  // p → q is arc a, q → p is arc a + 1
+    Node& np = node(p);
+    Node& nq = node(q);
+    arcs_.push_back({q, a + 1, np.firstArc, capacity});
+    arcs_.push_back({p, a, nq.firstArc, reverseCapacity});
+    np.firstArc = a;
+    nq.firstArc = a + 1;
 }
 
-// Active nodes form a FIFO threaded through Node::nextActive; the last one points to itself so that
-// "nextActive != kNone" means "is in the queue".
-template <typename Cap>
-void MaxFlow<Cap>::setActive(int i) {
-    Node& n = nodes_[static_cast<std::size_t>(i)];
-    if (n.nextActive != kNone) return;
-    if (activeLast_ != kNone)
-        nodes_[static_cast<std::size_t>(activeLast_)].nextActive = i;
-    else
-        activeFirst_ = i;
-    activeLast_ = i;
-    n.nextActive = i;
-}
-
-template <typename Cap>
-int MaxFlow<Cap>::nextActive() {
-    while (activeFirst_ != kNone) {
-        const int i = activeFirst_;
-        Node& n = nodes_[static_cast<std::size_t>(i)];
-        activeFirst_ = n.nextActive == i ? kNone : n.nextActive;
-        if (activeFirst_ == kNone) activeLast_ = kNone;
-        n.nextActive = kNone;
-        if (n.parent != kNone) return i;  // nodes freed since they were queued are skipped
-    }
-    return kNone;
-}
-
-template <typename Cap>
-void MaxFlow<Cap>::setOrphan(int i) {
-    nodes_[static_cast<std::size_t>(i)].parent = kOrphan;
-    orphans_.push_back(i);
-}
-
-// Push the bottleneck along source → (source tree) → middle arc → (sink tree) → sink.
-// Parent arcs point from a node to its parent, so in the source tree the flow runs on their reverse.
-template <typename Cap>
-void MaxFlow<Cap>::augment(int middle) {
-    auto node = [this](int i) -> Node& { return nodes_[static_cast<std::size_t>(i)]; };
-    auto arc = [this](int a) -> Arc& { return arcs_[static_cast<std::size_t>(a)]; };
-    const int tail = arc(middle ^ 1).head, head = arc(middle).head;
-
-    Cap b = arc(middle).rCap;
-    int i = tail;
-    for (int a; (a = node(i).parent) != kTerminal; i = arc(a).head) b = std::min(b, arc(a ^ 1).rCap);
-    b = std::min(b, node(i).trCap);
-    i = head;
-    for (int a; (a = node(i).parent) != kTerminal; i = arc(a).head) b = std::min(b, arc(a).rCap);
-    b = std::min(b, -node(i).trCap);
-
-    arc(middle ^ 1).rCap += b;
-    arc(middle).rCap -= b;
-    for (i = tail;;) {
-        const int a = node(i).parent;
-        if (a == kTerminal) break;
-        arc(a).rCap += b;
-        arc(a ^ 1).rCap -= b;
-        if (arc(a ^ 1).rCap == 0) setOrphan(i);
-        i = arc(a).head;
-    }
-    node(i).trCap -= b;
-    if (node(i).trCap == 0) setOrphan(i);
-    for (i = head;;) {
-        const int a = node(i).parent;
-        if (a == kTerminal) break;
-        arc(a ^ 1).rCap += b;
-        arc(a).rCap -= b;
-        if (arc(a).rCap == 0) setOrphan(i);
-        i = arc(a).head;
-    }
-    node(i).trCap += b;
-    if (node(i).trCap == 0) setOrphan(i);
-    flow_ += b;
-    ++augmentations_;
-}
-
-// Adoption: find orphan i a new parent in its own tree, through a non-saturated arc, whose path to
-// the terminal does not run through another orphan. Among candidates keep the one closest to the
-// terminal. Distances are cached with a time stamp so that repeated walks stay short.
-template <typename Cap>
-void MaxFlow<Cap>::processOrphan(int i, bool sinkTree) {
-    constexpr int kInfDist = std::numeric_limits<int>::max();
-    auto node = [this](int k) -> Node& { return nodes_[static_cast<std::size_t>(k)]; };
-    auto arc = [this](int a) -> Arc& { return arcs_[static_cast<std::size_t>(a)]; };
-    // Residual capacity of the link between i and its neighbour, in the direction the tree uses:
-    // towards i in the source tree, away from i in the sink tree.
-    auto residual = [&](int a0) { return sinkTree ? arc(a0).rCap : arc(a0 ^ 1).rCap; };
-
-    int best = kNone, dMin = kInfDist;
-    for (int a0 = node(i).first; a0 != kNone; a0 = arc(a0).next) {
-        if (residual(a0) == 0) continue;
-        const int j = arc(a0).head;
-        if (node(j).parent == kNone || node(j).isSink != sinkTree) continue;
-        int d = 0;
-        for (int k = j;;) {
-            if (node(k).ts == time_) {
-                d += node(k).dist;
-                break;
-            }
-            const int a = node(k).parent;
-            ++d;
-            if (a == kTerminal) {
-                node(k).ts = time_;
-                node(k).dist = 1;
-                break;
-            }
-            if (a == kOrphan) {
-                d = kInfDist;
-                break;
-            }
-            k = arc(a).head;
-        }
-        if (d == kInfDist) continue;
-        if (d < dMin) {
-            best = a0;
-            dMin = d;
-        }
-        for (int k = j; node(k).ts != time_; k = arc(node(k).parent).head) {
-            node(k).ts = time_;
-            node(k).dist = d--;
-        }
-    }
-
-    Node& n = node(i);
-    if (best != kNone) {
-        n.parent = best;
-        n.ts = time_;
-        n.dist = dMin + 1;
-        return;
-    }
-    // No valid parent: i becomes free. Its tree neighbours may grow into it again (make them
-    // active), and its children become orphans.
-    n.parent = kNone;
-    for (int a0 = n.first; a0 != kNone; a0 = arc(a0).next) {
-        const int j = arc(a0).head;
-        const int a = node(j).parent;
-        if (a == kNone || node(j).isSink != sinkTree) continue;
-        if (residual(a0) != 0) setActive(j);
-        if (a != kTerminal && a != kOrphan && arc(a).head == i) setOrphan(j);
-    }
-}
-
-template <typename Cap>
-Cap MaxFlow<Cap>::maxflow() {
-    // Initial trees: every node with terminal capacity hangs from its terminal.
-    activeFirst_ = activeLast_ = kNone;
-    time_ = 0;
-    augmentations_ = 0;
-    for (std::size_t k = 0; k < nodes_.size(); ++k) {
-        Node& n = nodes_[k];
-        n.nextActive = kNone;
-        n.ts = 0;
-        n.dist = 1;
-        n.parent = n.trCap != 0 ? kTerminal : kNone;
-        n.isSink = n.trCap < 0;
-        if (n.trCap != 0) setActive(static_cast<int>(k));
-    }
-
-    int current = kNone;  // the node we keep growing from after an augmentation
+double MaxFlow::solve() {
+    initialiseTrees();  // 0.
     for (;;) {
-        int i = current;
-        if (i != kNone) {
-            nodes_[static_cast<std::size_t>(i)].nextActive = kNone;
-            if (nodes_[static_cast<std::size_t>(i)].parent == kNone) i = kNone;
-        }
-        if (i == kNone && (i = nextActive()) == kNone) break;
-
-        // Growth: claim free neighbours reachable through non-saturated arcs; stop at the other tree.
-        Node& ni = nodes_[static_cast<std::size_t>(i)];
-        int middle = kNone;
-        for (int a = ni.first; a != kNone; a = arcs_[static_cast<std::size_t>(a)].next) {
-            const int out = ni.isSink ? (a ^ 1) : a;  // arc in the direction of the flow
-            if (arcs_[static_cast<std::size_t>(out)].rCap == 0) continue;
-            const int j = arcs_[static_cast<std::size_t>(a)].head;
-            Node& nj = nodes_[static_cast<std::size_t>(j)];
-            if (nj.parent == kNone) {
-                nj.isSink = ni.isSink;
-                nj.parent = a ^ 1;
-                nj.ts = ni.ts;
-                nj.dist = ni.dist + 1;
-                setActive(j);
-            } else if (nj.isSink != ni.isSink) {
-                middle = out;
-                break;
-            } else if (nj.ts <= ni.ts && nj.dist > ni.dist) {
-                // Heuristic from the paper: re-hang j under i if that brings it closer to the terminal.
-                nj.parent = a ^ 1;
-                nj.ts = ni.ts;
-                nj.dist = ni.dist + 1;
-            }
-        }
-
-        ++time_;
-        if (middle == kNone) {
-            current = kNone;
-            continue;
-        }
-        ni.nextActive = i;  // stays "active" without being queued: we come back to it first
-        current = i;
-        augment(middle);
-        // Orphans closest to the terminals first: once they are re-attached, the deeper ones can
-        // hang from them instead of being freed with their whole subtree (Kolmogorov's "front" order).
-        std::reverse(orphans_.begin(), orphans_.end());
-        while (orphanHead_ < orphans_.size()) {
-            const int o = orphans_[orphanHead_++];
-            processOrphan(o, nodes_[static_cast<std::size_t>(o)].isSink);
-        }
-        orphans_.clear();
-        orphanHead_ = 0;
+        const int bridge = grow();  // 1.
+        if (bridge == kNone) break;
+        augment(bridge);  // 2.
+        adopt();          // 3.
     }
     return flow_;
 }
 
-template <typename Cap>
-typename MaxFlow<Cap>::Segment MaxFlow<Cap>::segment(int i) const {
-    const Node& n = nodes_[static_cast<std::size_t>(i)];
-    return n.parent != kNone && n.isSink ? Sink : Source;
+MaxFlow::Side MaxFlow::side(int p) const {
+    return node(p).tree == Tree::T ? Side::Sink : Side::Source;
 }
 
-template class MaxFlow<std::int64_t>;
-template class MaxFlow<double>;
+// ---- helpers
+
+void MaxFlow::initialiseTrees() {
+    active_.clear();
+    orphans_.clear();
+    round_ = 0;
+    augmentations_ = 0;
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        Node& n = nodes_[i];
+        n.active = false;
+        n.checkedAt = 0;
+        n.parent = kNone;
+        n.tree = Tree::Free;
+        if (n.fromSource > 0) n.tree = Tree::S;
+        if (n.toSink > 0) n.tree = Tree::T;
+        if (n.tree != Tree::Free) {
+            n.parent = kTerminal;
+            activate(int(i));
+        }
+    }
+}
+
+void MaxFlow::activate(int p) {
+    Node& n = node(p);
+    if (n.active) return;
+    n.active = true;
+    active_.push_back(p);
+}
+
+// An orphan keeps its tree label but has no parent. Orphans found by augmentation are urgent: they
+// are processed nearest-the-terminal first, so that deeper orphans can hang from them again instead
+// of being freed with their whole subtree.
+void MaxFlow::makeOrphan(int p, bool urgent) {
+    node(p).parent = kNone;
+    if (urgent)
+        orphans_.push_front(p);
+    else
+        orphans_.push_back(p);
+}
+
+// Residual capacity of arc a = u → v in the direction in which u's tree carries flow: away from
+// the source in S (u → v itself), towards the sink in T (v → u, the sister arc).
+double MaxFlow::treeResidual(Tree tree, int a) const {
+    return tree == Tree::S ? arc(a).residual : arc(sister(a)).residual;
+}
+
+// Send `amount` along arc a: c_f(a) −= amount, and the reverse arc can now send it back.
+void MaxFlow::push(int a, double amount) {
+    arc(a).residual -= amount;
+    arc(sister(a)).residual += amount;
+}
+
+// ---- stage 1: growth
+
+// Scan the active nodes in FIFO order. From node p in tree X, every arc with treeResidual > 0 leads
+// to a neighbour q that is
+//   free         → q joins X with parent p, and becomes active (I3);
+//   in X         → nothing to do;
+//   in the other → the trees touch: return the arc from the S node to the T node.
+// p stays at the front of the queue when a bridge is found: after the augmentation, growth resumes
+// from it. Returns kNone when no active node is left: no augmenting path exists.
+int MaxFlow::grow() {
+    while (!active_.empty()) {
+        const int p = active_.front();
+        Node& np = node(p);
+        if (np.tree != Tree::Free) {
+            for (int a = np.firstArc; a != kNone; a = arc(a).next) {
+                if (treeResidual(np.tree, a) <= 0) continue;
+                const int q = arc(a).head;
+                Node& nq = node(q);
+                if (nq.tree == Tree::Free) {
+                    nq.tree = np.tree;
+                    nq.parent = sister(a);  // the arc q → p
+                    activate(q);
+                } else if (nq.tree != np.tree) {
+                    return np.tree == Tree::S ? a : sister(a);
+                }
+            }
+        }
+        // Every neighbour has been looked at (or p was freed since it was queued): p is passive.
+        active_.pop_front();
+        np.active = false;
+    }
+    return kNone;
+}
+
+// ---- stage 2: augmentation
+
+// The augmenting path is s → … → tail(bridge) → head(bridge) → … → t. A parent arc points from a
+// child to its parent, so flow runs along the sister of the parent arc in S, along the parent arc
+// itself in T. Δ = min of c_f over the path, terminal edges included.
+double MaxFlow::bottleneck(int bridge) const {
+    double delta = arc(bridge).residual;
+    int p = tail(bridge);
+    for (; node(p).parent != kTerminal; p = parentOf(p))
+        delta = std::min(delta, arc(sister(node(p).parent)).residual);
+    delta = std::min(delta, node(p).fromSource);
+    int q = arc(bridge).head;
+    for (; node(q).parent != kTerminal; q = parentOf(q))
+        delta = std::min(delta, arc(node(q).parent).residual);
+    return std::min(delta, node(q).toSink);
+}
+
+// Push Δ along the path. At least one arc becomes saturated; each saturated tree arc breaks (I2)
+// for its child, which becomes an orphan.
+void MaxFlow::augment(int bridge) {
+    const double delta = bottleneck(bridge);
+    push(bridge, delta);
+
+    // Source half, from the bridge up to s.
+    int p = tail(bridge);
+    while (node(p).parent != kTerminal) {
+        const int down = sister(node(p).parent);  // parent → p
+        const int up = parentOf(p);
+        push(down, delta);
+        if (arc(down).residual <= 0) makeOrphan(p, true);
+        p = up;
+    }
+    node(p).fromSource -= delta;
+    if (node(p).fromSource <= 0) makeOrphan(p, true);
+
+    // Sink half, from the bridge down to t.
+    int q = arc(bridge).head;
+    while (node(q).parent != kTerminal) {
+        const int towardsSink = node(q).parent;  // q → parent
+        const int up = parentOf(q);
+        push(towardsSink, delta);
+        if (arc(towardsSink).residual <= 0) makeOrphan(q, true);
+        q = up;
+    }
+    node(q).toSink -= delta;
+    if (node(q).toSink <= 0) makeOrphan(q, true);
+
+    flow_ += delta;
+    ++augmentations_;
+}
+
+// ---- stage 3: adoption
+
+// Restore (I2): every orphan finds a new parent or leaves its tree.
+void MaxFlow::adopt() {
+    ++round_;  // distances computed in an earlier round may be stale
+    while (!orphans_.empty()) {
+        const int p = orphans_.front();
+        orphans_.pop_front();
+        if (!findNewParent(p)) freeNode(p);
+    }
+}
+
+// Number of arcs from p up to its terminal, or "infinite" when the walk meets an orphan (p's own
+// subtree, or a branch cut by the augmentation). Every node walked through is stamped with this
+// round and its distance, so later walks stop there: each node is walked once per round. (A node
+// found valid in a round stays valid until the round ends: only orphans and their descendants are
+// re-parented or freed, and a valid node has no orphan above it.)
+int MaxFlow::distanceToTerminal(int p) {
+    constexpr int kInfinite = std::numeric_limits<int>::max();
+    int d = 0;
+    for (int r = p;; r = parentOf(r)) {
+        const Node& n = node(r);
+        if (n.checkedAt == round_) {
+            d += n.distance;
+            break;
+        }
+        if (n.parent == kNone) return kInfinite;  // an orphan
+        ++d;
+        if (n.parent == kTerminal) break;
+    }
+    int remaining = d;
+    for (int r = p; node(r).checkedAt != round_; r = parentOf(r)) {
+        Node& n = node(r);
+        n.checkedAt = round_;
+        n.distance = remaining--;
+        if (n.parent == kTerminal) break;
+    }
+    return d;
+}
+
+// A valid parent q for orphan p: in p's tree, able to carry flow to p in the tree's direction
+// (treeResidual of q → p > 0), and with a path to the terminal that avoids every orphan. Among the
+// valid ones, take the closest to the terminal to keep the trees shallow.
+bool MaxFlow::findNewParent(int p) {
+    Node& np = node(p);
+    int bestArc = kNone, bestDistance = std::numeric_limits<int>::max();
+    for (int a = np.firstArc; a != kNone; a = arc(a).next) {
+        const int q = arc(a).head;
+        if (node(q).tree != np.tree) continue;
+        if (treeResidual(np.tree, sister(a)) <= 0) continue;
+        const int d = distanceToTerminal(q);
+        if (d < bestDistance) {
+            bestDistance = d;
+            bestArc = a;
+        }
+    }
+    if (bestArc == kNone) return false;
+    np.parent = bestArc;
+    np.checkedAt = round_;
+    np.distance = bestDistance + 1;
+    return true;
+}
+
+// p has no valid parent: it leaves its tree. Neighbours in that tree that could reach p become
+// active again, so that growth may claim p back later (I3); p's children become orphans.
+void MaxFlow::freeNode(int p) {
+    Node& np = node(p);
+    const Tree tree = np.tree;
+    for (int a = np.firstArc; a != kNone; a = arc(a).next) {
+        const int q = arc(a).head;
+        Node& nq = node(q);
+        if (nq.tree != tree) continue;
+        if (treeResidual(tree, sister(a)) > 0) activate(q);
+        if (nq.parent >= 0 && parentOf(q) == p) makeOrphan(q, false);
+    }
+    np.tree = Tree::Free;
+}
 
 }  // namespace vl::stereo

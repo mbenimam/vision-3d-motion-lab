@@ -8,6 +8,7 @@
 #include "core/common/image.hpp"
 #include "core/stereo/block_matching.hpp"
 #include "core/stereo/graphcut_stereo.hpp"
+#include "core/stereo/opencv_baselines.hpp"
 
 namespace vl::app::stereo_views {
 
@@ -64,6 +65,31 @@ double badRate(const cv::Mat& disparity, const Working& w) {
     return w.truth.empty() ? 0.0 : vl::stereo::badPixelRate(disparity, w.truth, w.visible, 1.0);
 }
 
+double answeredPercent(const cv::Mat& disparity) {
+    long answered = 0;
+    for (int y = 0; y < disparity.rows; ++y)
+        for (int x = 0; x < disparity.cols; ++x) answered += std::isfinite(disparity.at<float>(y, x)) ? 1 : 0;
+    return 100.0 * double(answered) / double(disparity.total());
+}
+
+double occlusionsLeftOpenPercent(const cv::Mat& disparity, const Working& w) {
+    if (w.truth.empty()) return 0;
+    long hidden = 0, open = 0;
+    for (int y = 0; y < disparity.rows; ++y)
+        for (int x = 0; x < disparity.cols; ++x) {
+            if (w.truth.at<float>(y, x) <= 0 || w.visible.at<uchar>(y, x)) continue;
+            ++hidden;
+            open += std::isfinite(disparity.at<float>(y, x)) ? 0 : 1;
+        }
+    return hidden ? 100.0 * double(open) / double(hidden) : 0;
+}
+
+double answeredBadRate(const cv::Mat& disparity, const Working& w) {
+    if (w.truth.empty()) return 0.0;
+    const cv::Mat answered = disparity == disparity;  // false on NaN
+    return vl::stereo::badPixelRate(disparity, w.truth, w.visible & answered, 1.0);
+}
+
 cv::Mat dimmed(const cv::Mat& bgr) {
     cv::Mat g, out;
     cv::cvtColor(bgr, g, cv::COLOR_BGR2GRAY);
@@ -84,6 +110,27 @@ cv::Mat errorImage(const cv::Mat& disparity, const Working& w) {
                 err.at<cv::Vec3b>(y, x) = {138, 92, 255};  // colors::bad: wrong answer
         }
     return err;
+}
+
+void compareWithSemiGlobal(const Working& w, const OursForComparison& ours, Frame& f, Output& out) {
+    const auto sgbm = vl::stereo::opencv::semiGlobal(w.left, w.right, w.maxDisparity, ours.sgbmRadius);
+    View v = disparityView(QStringLiteral("OpenCV · Disparity"), sgbm.disparity, w, QStringLiteral("no answer"));
+    v.legend->label = QStringLiteral("cv::StereoSGBM disparity (px) · black: no answer");
+    f.views.push_back(std::move(v));
+
+    if (!w.truth.empty())
+        out.comparison.push_back({QStringLiteral("Bad pixels (non-occluded)"), 100 * badRate(ours.disparity, w),
+                                  100 * badRate(sgbm.disparity, w), QStringLiteral(" %")});
+    if (ours.answeredErrorRow && !w.truth.empty())
+        out.comparison.push_back({QStringLiteral("Errors among answered pixels"), 100 * answeredBadRate(ours.disparity, w),
+                                  100 * answeredBadRate(sgbm.disparity, w), QStringLiteral(" %")});
+    out.comparison.push_back({QStringLiteral("Pixels with an answer"), answeredPercent(ours.disparity),
+                              answeredPercent(sgbm.disparity), QStringLiteral(" %"), 1, false});
+    if (ours.occlusionRow && !w.truth.empty())
+        out.comparison.push_back({QStringLiteral("True occlusions left unmatched"),
+                                  occlusionsLeftOpenPercent(ours.disparity, w),
+                                  occlusionsLeftOpenPercent(sgbm.disparity, w), QStringLiteral(" %"), 0, false});
+    out.comparison.push_back({QStringLiteral("Run time"), ours.ms, sgbm.ms, QStringLiteral(" ms"), 0});
 }
 
 std::vector<Module::ClickShapes> matchClick(const cv::Mat& disp, int rightView, int viewCount, QPointF px,
