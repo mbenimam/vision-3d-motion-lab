@@ -1,0 +1,8 @@
+<RCC>
+  <qresource prefix="/theme">
+    <file>dark.qss</file>
+    <file>chevron.svg</file>
+    <file>knob-off.svg</file>
+    <file>knob-on.svg</file>
+  </qresource>
+</RCC>
