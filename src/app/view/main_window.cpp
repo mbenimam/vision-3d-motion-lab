@@ -247,6 +247,7 @@ void MainWindow::showOutput(bool keepZoom) {
         }
         if (video && s.inputs) timeline_->setFrames(0, int(s.inputs->images.size()), s.inputs->fps);
         headline_->clear();
+        headline_->hide();
         inspector_->setResult(s);
         return;
     }
@@ -258,6 +259,7 @@ void MainWindow::showOutput(bool keepZoom) {
         if (st.emphasis) headline = QStringLiteral("<span style='color:#9aa4b2'>%1</span>&nbsp;&nbsp;<b>%2</b>")
                                         .arg(st.label.toHtmlEscaped(), st.value.toHtmlEscaped());
     headline_->setText(headline);
+    headline_->setVisible(!headline.isEmpty());  // no empty chip before the first result
     const std::vector<Shape>* extra = nullptr;
     for (const auto& cs : s.clickShapes)
         if (cs.view == view) extra = &cs.shapes;

@@ -10,7 +10,7 @@ QToolTip { background: #1a2130; color: #e6e6e6; border: 1px solid #2c3546; paddi
 #navPanel { background: #121722; border-right: 1px solid #222a37; }
 #brand { color: #ffffff; font-size: 16px; font-weight: 700; padding: 0 8px; }
 #tagline { color: #9aa4b2; font-size: 12px; padding: 2px 8px 0 8px; }
-#keys { color: #6b7686; font-size: 11px; padding: 8px; }
+#keys { color: #9aa4b2; font-size: 11px; padding: 8px; }
 #nav { background: transparent; border: none; }
 #nav::item { color: #b9c1cc; padding: 0 10px; border-radius: 6px; margin: 1px 0; }
 #nav::item:hover { background: #1a2130; color: #ffffff; }
@@ -21,7 +21,6 @@ QToolTip { background: #1a2130; color: #e6e6e6; border: 1px solid #2c3546; paddi
 #title { color: #ffffff; font-size: 20px; font-weight: 650; }
 #busy, #zoom { color: #9aa4b2; font-size: 12px; }
 #headline { color: #ffcf66; font-size: 13px; background: #161b26; border: 1px solid #2c3546; border-radius: 6px; padding: 4px 10px; }
-#headline[text=""] { border: none; background: transparent; padding: 0; }
 #status, #frameLabel { color: #9aa4b2; font-size: 12px; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
 #progress { background: #0e1117; border: none; }
 #progress::chunk { background: #ffb000; }
@@ -104,3 +103,10 @@ QPushButton#compare:checked { background: #13261c; color: #7ee2a4; border-color:
 #codeFiles::item:selected { background: #1e2635; color: #ffffff; }
 #codePath { color: #9aa4b2; background: #0e1117; padding: 10px 14px; font-family: "JetBrains Mono", monospace; font-size: 12px; border-bottom: 1px solid #222a37; }
 QPlainTextEdit#code { background: #0b0e14; color: #d6dce4; border: none; selection-background-color: #2a2414; }
+
+/* keyboard focus: a visible amber ring on every control that takes focus (Tab navigation) */
+QPushButton:focus, QToolButton:focus, QComboBox:focus { border: 1px solid #ffb000; }
+QSlider:focus::handle:horizontal { background: #ffcf66; border: 2px solid #ffb000; }
+QCheckBox#toggle:focus { color: #ffffff; }
+#nav:focus { border: none; }
+#nav::item:focus { outline: none; }
