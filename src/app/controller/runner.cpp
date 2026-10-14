@@ -77,7 +77,9 @@ void Runner::launch() {
         bool cancelled = false;
         vl::Stopwatch sw;
         try {
-            out = std::make_shared<const Output>(module->compute(*inputs, params, ctx));
+            Output result = module->compute(*inputs, params, ctx);
+            if (ctx.compare) addSideBySideViews(result);
+            out = std::make_shared<const Output>(std::move(result));
         } catch (const vl::Cancelled&) {
             cancelled = true;
         } catch (const std::exception& e) {

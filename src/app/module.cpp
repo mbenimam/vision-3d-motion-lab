@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QPainter>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -139,6 +140,50 @@ QString dataFile(const QString& relative) {
         if (f.exists()) return f.absoluteFilePath();
     }
     return {};
+}
+
+void addSideBySideViews(Output& out) {
+    static const QString prefix = QStringLiteral("OpenCV · ");
+    for (auto& frame : out.frames) {
+        std::vector<View> extra;
+        for (const auto& theirs : frame.views) {
+            if (!theirs.name.startsWith(prefix)) continue;
+            const QString name = theirs.name.mid(prefix.size());
+            const auto ours = std::find_if(frame.views.begin(), frame.views.end(), [&](const View& v) { return v.name == name; });
+            if (ours == frame.views.end()) continue;
+            View pair;
+            pair.name = name + QStringLiteral(" · ours | OpenCV");
+            // Our overlays stay on the left half; the right half starts after a 12-pixel gap.
+            pair.shapes = ours->shapes;
+            const View a = *ours, b = theirs;
+            pair.render = [a, b] {
+                const QImage left = a.picture(), right = b.picture();
+                if (left.size() != right.size()) return left;
+                const int gap = 12;
+                QImage both(left.width() * 2 + gap, left.height(), QImage::Format_RGB888);
+                both.fill(QColor(0x0b, 0x0e, 0x14));
+                QPainter p(&both);
+                p.drawImage(0, 0, left);
+                p.drawImage(left.width() + gap, 0, right);
+                QFont f = p.font();
+                f.setBold(true);
+                f.setPixelSize(std::max(11, left.height() / 28));
+                p.setFont(f);
+                const auto tag = [&](int x, const QString& text) {
+                    const QRect r = p.fontMetrics().boundingRect(text).adjusted(-6, -3, 6, 3);
+                    p.fillRect(r.translated(x + 8 - r.left(), 8 - r.top()), QColor(14, 17, 23, 210));
+                    p.setPen(QColor(0xff, 0xcf, 0x66));
+                    p.drawText(x + 14, 8 - r.top() - 3, text);
+                };
+                tag(0, QObject::tr("ours"));
+                tag(left.width() + gap, QObject::tr("OpenCV"));
+                return both;
+            };
+            pair.legend = ours->legend;
+            extra.push_back(std::move(pair));
+        }
+        for (auto& v : extra) frame.views.push_back(std::move(v));
+    }
 }
 
 }  // namespace vl::app

@@ -98,9 +98,14 @@ void Document::setOutput(OutputPtr output, double ms) {
     s.error.clear();
     if (s.output && !s.output->frames.empty()) {
         const auto& views = s.output->frames.front().views;
-        if (!s.viewChosen && !s.info.defaultView.isEmpty())
+        // Open on the topic's result, or on "result · ours | OpenCV" when comparing.
+        if (!s.viewChosen && !s.info.defaultView.isEmpty()) {
+            const QString pair = s.info.defaultView + QStringLiteral(" · ours | OpenCV");
             for (int i = 0; i < int(views.size()); ++i)
                 if (views[size_t(i)].name == s.info.defaultView) s.view = i;
+            for (int i = 0; i < int(views.size()); ++i)
+                if (views[size_t(i)].name == pair) s.view = i;
+        }
         s.frame = std::min(s.frame, int(s.output->frames.size()) - 1);
         s.view = std::min(s.view, int(s.output->frames.front().views.size()) - 1);
     }

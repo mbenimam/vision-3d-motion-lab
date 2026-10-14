@@ -214,5 +214,8 @@ std::vector<cv::Mat> loadImages(const QStringList& paths);  // BGR, throws on fa
 // Absolute path of a file under data/ (filled by scripts/fetch_data.sh), or empty if it is missing.
 // Looks in $VL_DATA, ./data, next to the executable and in the source tree.
 QString dataFile(const QString& relative);
+// For every pair of views "X" and "OpenCV · X" of the same size, add a view "X · ours | OpenCV"
+// showing both side by side (drawn on demand). The runner calls it on compared results.
+void addSideBySideViews(Output& out);
 
 }  // namespace vl::app
