@@ -115,15 +115,17 @@ int main(int argc, char* argv[]) {
             if (!s.error.isEmpty()) std::printf("  error: %s\n", qPrintable(s.error));
             if (s.output)
                 for (const auto& st : s.output->stats)
-                    std::printf("  %-34s %s%s\n", qPrintable(st.label), qPrintable(st.value), st.emphasis ? "   <-" : "");
+                    std::printf("  %s %s%s\n", qPrintable(st.label.leftJustified(34)), qPrintable(st.value), st.emphasis ? "   <-" : "");
             if (s.output && !s.output->comparison.empty()) {
-                std::printf("  %-34s %14s %14s\n", "ours vs OpenCV", "ours", "OpenCV");
+                // Pad as text (not bytes), so labels with σ or − stay aligned.
+                std::printf("  %s %s %s\n", qPrintable(QStringLiteral("ours vs OpenCV").leftJustified(34)),
+                            qPrintable(QStringLiteral("ours").rightJustified(14)), qPrintable(QStringLiteral("OpenCV").rightJustified(14)));
                 for (const auto& c : s.output->comparison)
-                    std::printf("  %-34s %14s %14s\n", qPrintable(c.metric),
-                                qPrintable(vl::app::fmt(c.ours, c.decimals) + c.unit),
-                                qPrintable(vl::app::fmt(c.opencv, c.decimals) + c.unit));
+                    std::printf("  %s %s %s\n", qPrintable(c.metric.leftJustified(34)),
+                                qPrintable((vl::app::fmt(c.ours, c.decimals) + c.unit).rightJustified(14)),
+                                qPrintable((vl::app::fmt(c.opencv, c.decimals) + c.unit).rightJustified(14)));
             }
-            std::printf("  %-34s %s\n", "Run time", qPrintable(vl::app::fmtMs(s.lastRunMs)));
+            std::printf("  %s %s\n", qPrintable(QStringLiteral("Run time").leftJustified(34)), qPrintable(vl::app::fmtMs(s.lastRunMs)));
             QApplication::quit();
         });
     if (!steps.empty()) {
