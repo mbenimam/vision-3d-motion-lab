@@ -1,3 +1,5 @@
+#include <thread>
+
 #include <gtest/gtest.h>
 
 #include "core/geometry/features.hpp"
@@ -84,6 +86,20 @@ TEST(Stitch, SyntheticRotatingCameraEndToEnd) {
     }
     const auto toRef = chainToReference(links, views.reference);
     for (int i = 0; i < 3; ++i) EXPECT_LT(cornerError(toRef[size_t(i)], views.toReference[size_t(i)], {480, 360}), 1.5);
+}
+
+// The app builds samples on worker threads: a scene must not depend on which thread built it
+// (OpenCV's global RNG is per thread, so any unseeded noise would break this).
+TEST(Scenes, RotatingCameraIsTheSameOnEveryThread) {
+    const auto here = scenes::rotatingCamera({160, 120}, 2, 20.0, 4);
+    scenes::RotatingViews there;
+    std::thread([&] {
+        cv::theRNG().next();  // a worker whose global RNG has already been used
+        there = scenes::rotatingCamera({160, 120}, 2, 20.0, 4);
+    }).join();
+    ASSERT_EQ(here.images.size(), there.images.size());
+    for (size_t i = 0; i < here.images.size(); ++i)
+        EXPECT_EQ(cv::norm(here.images[i], there.images[i], cv::NORM_INF), 0.0) << "view " << i;
 }
 
 TEST(Matching, MutualCheckAndRatioFilter) {

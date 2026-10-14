@@ -4,6 +4,7 @@
 //   vision-lab --module stereo-local --sample 1 --set radius=5 --view 3 --frame 10
 //              --click 120,80 --screenshot out.png --size 1440x900
 //   vision-lab --list                  print the topic ids
+//   vision-lab --module stereo-graphcut --sample 2 --stats    print the numbers of one run
 //
 // The screenshot options render the window after the first complete result and quit; with
 // QT_QPA_PLATFORM=offscreen they run headless (CI and README pictures).
@@ -40,12 +41,13 @@ int main(int argc, char* argv[]) {
     QCommandLineOption roi(QStringLiteral("roi"), QStringLiteral("Box x,y,w,h for tracking topics."), QStringLiteral("box"));
     QCommandLineOption shot(QStringLiteral("screenshot"), QStringLiteral("Save the window to a PNG and quit."), QStringLiteral("png"));
     QCommandLineOption size(QStringLiteral("size"), QStringLiteral("Window size WxH."), QStringLiteral("WxH"));
-    cli.addOptions({list, module, sample, set, view, frame, click, roi, shot, size});
+    QCommandLineOption stats(QStringLiteral("stats"), QStringLiteral("Print the result's numbers and quit."));
+    cli.addOptions({list, module, sample, set, view, frame, click, roi, shot, size, stats});
     cli.process(app);
 
     // Automated runs start from the default parameters and leave the user's settings alone.
     QTemporaryDir automationSettings;
-    if (cli.isSet(shot) || cli.isSet(list)) {
+    if (cli.isSet(shot) || cli.isSet(list) || cli.isSet(stats)) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, automationSettings.path());
     }
@@ -99,6 +101,17 @@ int main(int argc, char* argv[]) {
             });
         });
     }
+    if (cli.isSet(stats))
+        steps.push_back([&] {
+            const auto& s = controller.document().current();
+            std::printf("%s · %s\n", qPrintable(s.info.title), s.inputs ? qPrintable(s.inputs->name) : "");
+            if (!s.error.isEmpty()) std::printf("  error: %s\n", qPrintable(s.error));
+            if (s.output)
+                for (const auto& st : s.output->stats)
+                    std::printf("  %-34s %s%s\n", qPrintable(st.label), qPrintable(st.value), st.emphasis ? "   <-" : "");
+            std::printf("  %-34s %s\n", "Run time", qPrintable(vl::app::fmtMs(s.lastRunMs)));
+            QApplication::quit();
+        });
     if (!steps.empty()) {
         auto runNext = std::make_shared<std::function<void()>>();
         auto index = std::make_shared<size_t>(0);

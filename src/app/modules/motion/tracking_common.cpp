@@ -70,8 +70,8 @@ void summarise(Output& out, const Summary& s, const QString& scoreLabel, double 
     out.stats.push_back({QStringLiteral("Lost frames"), QStringLiteral("%1 of %2").arg(s.lost).arg(n), !s.hasTruth});
     out.stats.push_back({QStringLiteral("Mean ") + scoreLabel, fmt(mean(s.score), 0) + QStringLiteral(" %")});
     if (iterations) {
-        out.stats.push_back({QStringLiteral("Mean-shift iterations"), fmt(mean(s.iterations), 1) + QStringLiteral(" / frame")});
-        out.series.push_back({QStringLiteral("Iterations per frame"), s.iterations});
+        out.stats.push_back({QStringLiteral("Mean-shift iterations"), fmt(mean(s.iterations), 1) + QStringLiteral(" per frame")});
+        out.series.push_back({QStringLiteral("Iterations, frame by frame"), s.iterations});
     }
     out.stats.push_back({QStringLiteral("Time per frame"), fmtMs(ms / double(std::max<size_t>(1, n)))});
     out.series.push_back({scoreLabel + QStringLiteral(" per frame (%)"), s.score});

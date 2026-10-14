@@ -108,7 +108,7 @@ RotatingViews rotatingCamera(cv::Size viewSize, int nViews, double stepDeg, std:
     const cv::Matx33d Ks(f, 0, 8 - x0, 0, f, 8 - y0, 0, 0, 1);
     const cv::Mat backdrop = poster(cv::Size(int(x1 - x0) + 16, int(y1 - y0) + 16), seed);
 
-    std::mt19937 rng(seed);
+    cv::RNG noiseRng(seed + 99);  // seeded: the scene must not depend on the thread that builds it
     const double gains[] = {0.82, 1.0, 1.18, 0.9, 1.1};
     for (int i = 0; i < nViews; ++i) {
         // view(x) = backdrop(Ks Rᵢᵀ K⁻¹ x): exactly the projective map the camera applies.
@@ -116,12 +116,8 @@ RotatingViews rotatingCamera(cv::Size viewSize, int nViews, double stepDeg, std:
         cv::Mat view;
         cv::warpPerspective(backdrop, view, cv::Mat(M), viewSize, cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
                             cv::BORDER_REPLICATE);
-        cv::Mat noise(view.size(), CV_32FC3);
-        cv::randn(noise, 0, 2.0);
-        cv::Mat vf;
-        view.convertTo(vf, CV_32FC3, gains[i % 5]);
-        vf += noise;
-        vf.convertTo(view, CV_8UC3);
+        view.convertTo(view, CV_8UC3, gains[i % 5]);  // each view its own exposure
+        vl::synth::addNoise(view, 2.0, noiseRng);
         out.images.push_back(view);
         out.toReference.push_back(K * R[size_t(out.reference)] * R[size_t(i)].t() * Kinv);
     }

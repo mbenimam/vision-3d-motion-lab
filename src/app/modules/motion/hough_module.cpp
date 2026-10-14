@@ -143,10 +143,10 @@ public:
             if (truth.area() > 0) {
                 const double o = iou(s.box, truth);
                 sum.iou.push_back(o);
-                f.stats.push_back({QStringLiteral("IoU (this frame)"), fmt(o, 2)});
+                f.stats.push_back({QStringLiteral("This frame: IoU"), fmt(o, 2)});
             }
-            f.stats.push_back({QStringLiteral("Peak votes"), QStringLiteral("%1 of %2 (%3 %)").arg(r.peak, 0, 'f', 0).arg(entries, 0, 'f', 0).arg(100 * s.score, 0, 'f', 0)});
-            if (s.lost) f.stats.push_back({QStringLiteral("Status"), QStringLiteral("lost")});
+            f.stats.push_back({QStringLiteral("This frame: peak votes"), QStringLiteral("%1 of %2 (%3 %)").arg(r.peak, 0, 'f', 0).arg(entries, 0, 'f', 0).arg(100 * s.score, 0, 'f', 0)});
+            if (s.lost) f.stats.push_back({QStringLiteral("This frame"), QStringLiteral("lost")});
             out.frames.push_back(std::move(f));
 
             report(ctx.progress, double(t + 1) / double(in.images.size()), "frame " + std::to_string(t + 1));

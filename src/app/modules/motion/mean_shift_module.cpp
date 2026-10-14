@@ -112,10 +112,10 @@ public:
             if (truth.area() > 0) {
                 const double o = iou(s.box, truth);
                 sum.iou.push_back(o);
-                f.stats.push_back({QStringLiteral("IoU (this frame)"), fmt(o, 2)});
+                f.stats.push_back({QStringLiteral("This frame: IoU"), fmt(o, 2)});
             }
-            f.stats.push_back({QStringLiteral("Model weight in the box"), fmt(100 * s.score, 0) + QStringLiteral(" %")});
-            f.stats.push_back({QStringLiteral("Mean-shift iterations"), QString::number(s.iterations)});
+            f.stats.push_back({QStringLiteral("This frame: model weight"), fmt(100 * s.score, 0) + QStringLiteral(" %")});
+            f.stats.push_back({QStringLiteral("This frame: iterations"), QString::number(s.iterations)});
             if (s.lost) f.stats.push_back({QStringLiteral("Status"), QStringLiteral("lost")});
             out.frames.push_back(std::move(f));
 

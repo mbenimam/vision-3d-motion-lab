@@ -1,5 +1,6 @@
 // Topic: local stereo by block matching (SAD, SSD, ZNCC), with the left-right consistency check.
 
+#include <algorithm>
 #include <cmath>
 
 #include <opencv2/imgproc.hpp>
@@ -33,7 +34,8 @@ public:
             ParamSpec::integer(QStringLiteral("radius"), QStringLiteral("Window radius"), 1, 12, 3, 1, QStringLiteral(" px"))
                 .withHelp(QStringLiteral("The window is (2r+1)² pixels. Larger: smoother and more reliable, but "
                                          "depth edges spread.")),
-            ParamSpec::integer(QStringLiteral("maxd"), QStringLiteral("Largest disparity searched"), 8, 96, 64, 4, QStringLiteral(" px")),
+            ParamSpec::integer(QStringLiteral("maxd"), QStringLiteral("Largest disparity searched"), 8, 96, 64, 4, QStringLiteral(" px"))
+                .withHelp(QStringLiteral("Upper limit; the search also stops at the scene's own range.")),
             ParamSpec::toggle(QStringLiteral("lr"), QStringLiteral("Left-right consistency check"), true)
                 .withHelp(QStringLiteral("Match right-to-left too and reject pixels where both directions disagree: "
                                          "mostly occlusions and textureless areas.")),
@@ -47,7 +49,9 @@ public:
         stereo::BlockMatchParams bp;
         bp.cost = static_cast<stereo::Cost>(intParam(p, "cost"));
         bp.radius = intParam(p, "radius");
-        bp.maxDisparity = intParam(p, "maxd");
+        // Search no further than the scene needs (from its ground truth, or a share of the width):
+        // a wider range only adds chances to match the wrong place.
+        bp.maxDisparity = std::min(intParam(p, "maxd"), stereo_samples::maxDisparityHint(in));
         bp.leftRightCheck = toggleParam(p, "lr");
         bp.subpixel = toggleParam(p, "subpixel");
         const auto res = stereo::blockMatch(in.images[0], in.images[1], bp, ctx.stop, ctx.progress);
@@ -114,6 +118,7 @@ public:
         }
         const double rejected = 100.0 * cv::countNonZero(res.rejected) / double(res.rejected.total());
         out.stats.push_back({QStringLiteral("Rejected by the L-R check"), fmt(rejected) + QStringLiteral(" %")});
+        out.stats.push_back({QStringLiteral("Disparities searched"), QStringLiteral("0 – %1 px").arg(bp.maxDisparity)});
         out.stats.push_back({QStringLiteral("Cost evaluations"),
                              QString::number(double(d.total()) * (bp.maxDisparity + 1), 'g', 3)});
         out.frames.push_back(std::move(f));
