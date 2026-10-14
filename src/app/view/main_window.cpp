@@ -73,6 +73,9 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     crumb_->setObjectName(QStringLiteral("crumb"));
     title_ = new QLabel;
     title_->setObjectName(QStringLiteral("title"));
+    title_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);  // a long title never widens the window
+    title_->setMinimumWidth(160);
+    crumb_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     titles->addWidget(crumb_);
     titles->addWidget(title_);
     top->addLayout(titles, 1);
@@ -80,6 +83,8 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     headline_ = new QLabel;
     headline_->setObjectName(QStringLiteral("headline"));
     headline_->setTextFormat(Qt::RichText);
+    headline_->setMaximumWidth(360);
+    headline_->setMinimumWidth(1);  // a long progress line clips instead of widening the window
     top->addWidget(headline_);
     top->addSpacing(10);
     zoom_ = new QLabel;
@@ -231,9 +236,11 @@ void MainWindow::rebuildViewTabs() {
         b->setProperty("segment", views.size() == 1 ? "only" : i == 0 ? "first" : i == int(views.size()) - 1 ? "last" : "middle");
         tabGroup_->addButton(b, i);
         tabsLayout_->addWidget(b);
+        b->show();  // the strip is already on screen: show now rather than on a deferred event
     }
     if (auto* b = tabGroup_->button(s.view)) b->setChecked(true);
     tabs_->adjustSize();
+    tabs_->show();
     tabScroll_->setVisible(views.size() > 1);
     if (auto* b = tabGroup_->button(s.view)) static_cast<QScrollArea*>(tabScroll_)->ensureWidgetVisible(b);
 }

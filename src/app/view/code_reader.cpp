@@ -165,7 +165,7 @@ void CodeReader::showTopic(const QString& topicTitle, const QStringList& sources
     for (const QString& s : sources) add(s);
     header(tr("The whole core library"));
     QStringList all;
-    QDirIterator it(QStringLiteral(":/source/src/core"), QDirIterator::Subdirectories);
+    QDirIterator it(QStringLiteral(":/source/src/core"), QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext()) {
         const QString p = it.next().mid(QStringLiteral(":/source/").size());
         if (!sources.contains(p) && !p.endsWith(QLatin1String("empty.cpp"))) all << p;

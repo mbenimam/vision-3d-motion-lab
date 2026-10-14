@@ -36,7 +36,7 @@ int main(int argc, char* argv[]) {
     QCommandLineOption module(QStringLiteral("module"), QStringLiteral("Topic to open."), QStringLiteral("id"));
     QCommandLineOption sample(QStringLiteral("sample"), QStringLiteral("Sample index."), QStringLiteral("n"));
     QCommandLineOption set(QStringLiteral("set"), QStringLiteral("Parameter value, key=value (repeatable)."), QStringLiteral("kv"));
-    QCommandLineOption view(QStringLiteral("view"), QStringLiteral("View index (1 = first)."), QStringLiteral("n"));
+    QCommandLineOption view(QStringLiteral("view"), QStringLiteral("View: index (1 = first) or name."), QStringLiteral("n|name"));
     QCommandLineOption frame(QStringLiteral("frame"), QStringLiteral("Frame index (1 = first)."), QStringLiteral("n"));
     QCommandLineOption click(QStringLiteral("click"), QStringLiteral("Click at image pixel x,y."), QStringLiteral("x,y"));
     QCommandLineOption roi(QStringLiteral("roi"), QStringLiteral("Box x,y,w,h for tracking topics."), QStringLiteral("box"));
@@ -92,14 +92,24 @@ int main(int argc, char* argv[]) {
     if (cli.isSet(shot)) {
         const QString path = cli.value(shot);
         steps.push_back([&, path] {
-            if (cli.isSet(view)) controller.setView(cli.value(view).toInt() - 1);
+            if (cli.isSet(view)) {
+                // A number (1 = first) or a view's name ("Disparity · ours | OpenCV").
+                bool isNumber = false;
+                const int n = cli.value(view).toInt(&isNumber);
+                int index = isNumber ? n - 1 : -1;
+                const auto& out = controller.document().current().output;
+                if (!isNumber && out && !out->frames.empty())
+                    for (int i = 0; i < int(out->frames.front().views.size()); ++i)
+                        if (out->frames.front().views[size_t(i)].name == cli.value(view)) index = i;
+                if (index >= 0) controller.setView(index);
+            }
             if (cli.isSet(frame)) controller.setFrame(cli.value(frame).toInt() - 1);
             if (cli.isSet(click)) {
                 const auto xy = cli.value(click).split(u',');
                 if (xy.size() == 2) controller.click(QPointF(xy[0].toDouble(), xy[1].toDouble()));
             }
             if (cli.isSet(code)) controller.showCode();
-            QTimer::singleShot(150, [&, path] {
+            QTimer::singleShot(600, [&, path] {  // let deferred layout and paint events settle first
                 QWidget* target = cli.isSet(code) ? static_cast<QWidget*>(controller.codeReader())
                                                   : static_cast<QWidget*>(controller.window());
                 target->grab().save(path);
