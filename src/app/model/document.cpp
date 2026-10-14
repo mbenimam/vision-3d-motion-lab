@@ -96,6 +96,10 @@ void Document::setOutput(OutputPtr output, double ms) {
     s.lastRunMs = ms;
     s.error.clear();
     if (s.output && !s.output->frames.empty()) {
+        const auto& views = s.output->frames.front().views;
+        if (!s.viewChosen && !s.info.defaultView.isEmpty())
+            for (int i = 0; i < int(views.size()); ++i)
+                if (views[size_t(i)].name == s.info.defaultView) s.view = i;
         s.frame = std::min(s.frame, int(s.output->frames.size()) - 1);
         s.view = std::min(s.view, int(s.output->frames.front().views.size()) - 1);
     }
@@ -127,6 +131,9 @@ void Document::setFrame(int frame) {
 
 void Document::setView(int view) {
     auto& s = cur();
+    const int n = s.output && !s.output->frames.empty() ? int(s.output->frames.front().views.size()) : 1;
+    view = std::clamp(view, 0, std::max(0, n - 1));
+    s.viewChosen = true;
     if (view == s.view) return;
     s.view = view;
     emit viewChanged(view);

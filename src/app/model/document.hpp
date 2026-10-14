@@ -24,6 +24,7 @@ struct ModuleState {
     QString error;
     int frame = 0;
     int view = 0;
+    bool viewChosen = false;  // the user picked a view: stop applying Info::defaultView
     std::vector<Module::ClickShapes> clickShapes;
 };
 

@@ -11,6 +11,8 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QScreen>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <cstdio>
 
@@ -40,6 +42,13 @@ int main(int argc, char* argv[]) {
     QCommandLineOption size(QStringLiteral("size"), QStringLiteral("Window size WxH."), QStringLiteral("WxH"));
     cli.addOptions({list, module, sample, set, view, frame, click, roi, shot, size});
     cli.process(app);
+
+    // Automated runs start from the default parameters and leave the user's settings alone.
+    QTemporaryDir automationSettings;
+    if (cli.isSet(shot) || cli.isSet(list)) {
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, automationSettings.path());
+    }
 
     vl::app::AppController controller;
     if (cli.isSet(list)) {
@@ -71,6 +80,7 @@ int main(int argc, char* argv[]) {
                     controller.document().setParam(QStringLiteral("roi"),
                                                    QRectF(b[0].toDouble(), b[1].toDouble(), b[2].toDouble(), b[3].toDouble()));
             }
+            controller.syncInspector();
             controller.recompute(0);
         });
     if (cli.isSet(shot)) {

@@ -244,6 +244,8 @@ void AppController::exportPicture() {
     if (!path.isEmpty()) img.save(path);
 }
 
+void AppController::syncInspector() { window_->inspector()->syncParams(doc_->current().params); }
+
 void AppController::whenIdle(std::function<void()> fn) { onIdle_ = std::move(fn); }
 
 }  // namespace vl::app

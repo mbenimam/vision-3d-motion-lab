@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    # Ubuntu 24.04 ships Qt 6.4 and OpenCV 4.6: the oldest versions the code supports.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt 6, OpenCV, GoogleTest
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build qt6-base-dev libgl1-mesa-dev \
+            libopencv-dev libgtest-dev
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Unit tests
+        run: ctest --preset release
+
+      - name: Every topic runs headless on its synthetic sample
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          mkdir -p screenshots
+          for id in $(build/release/vision-lab --list | awk '{print $1}'); do
+            echo "::group::$id"
+            timeout 300 build/release/vision-lab --module "$id" --screenshot "screenshots/$id.png" --size 1440x900
+            test -s "screenshots/$id.png"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/

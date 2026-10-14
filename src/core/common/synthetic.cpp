@@ -10,19 +10,19 @@
 namespace vl::synth {
 namespace {
 
-// Sum of octaves of bilinearly upsampled uniform noise, normalised to [0, 1].
+// Sum of octaves of cubic-upsampled uniform noise (coarse blobs down to 2-pixel grain), normalised to [0, 1].
 cv::Mat noiseField(cv::Size size, std::mt19937& rng) {
     cv::Mat acc = cv::Mat::zeros(size, CV_32F);
     std::uniform_real_distribution<float> u(0.f, 1.f);
     float amp = 1.f, total = 0.f;
-    for (int cell = 2; cell <= 64; cell *= 2) {
+    for (int cell = 2; cell <= 128; cell *= 2) {
         cv::Mat small(std::max(2, size.height * cell / 256 + 2), std::max(2, size.width * cell / 256 + 2), CV_32F);
         for (auto it = small.begin<float>(); it != small.end<float>(); ++it) *it = u(rng);
         cv::Mat up;
         cv::resize(small, up, size, 0, 0, cv::INTER_CUBIC);
         acc += amp * up;
         total += amp;
-        amp *= 0.62f;
+        amp *= 0.78f;  // slow decay: enough fine grain to match on, despite sensor noise
     }
     acc /= total;
     cv::normalize(acc, acc, 0, 1, cv::NORM_MINMAX);
@@ -30,14 +30,27 @@ cv::Mat noiseField(cv::Size size, std::mt19937& rng) {
 }
 
 void strokes(cv::Mat& img, std::mt19937& rng, int count) {
-    std::uniform_int_distribution<int> x(0, img.cols - 1), y(0, img.rows - 1), g(0, 255), t(1, 3);
+    // Strokes in a much darker or lighter shade of the local tone: strong edges to match on, no
+    // random saturated colours.
+    std::uniform_int_distribution<int> x(0, img.cols - 1), y(0, img.rows - 1), t(1, 3), dark(0, 1);
+    std::uniform_real_distribution<double> lo(0.15, 0.4), hi(1.7, 2.4);
     for (int i = 0; i < count; ++i) {
-        const cv::Scalar c = img.channels() == 1 ? cv::Scalar(g(rng)) : cv::Scalar(g(rng), g(rng), g(rng));
-        cv::line(img, {x(rng), y(rng)}, {x(rng), y(rng)}, c, t(rng), cv::LINE_AA);
+        const cv::Point a(x(rng), y(rng)), b(x(rng), y(rng));
+        const cv::Scalar base = cv::mean(img(cv::Rect(std::min(a.x, b.x), std::min(a.y, b.y),
+                                                     std::abs(a.x - b.x) + 1, std::abs(a.y - b.y) + 1)));
+        cv::line(img, a, b, base * (dark(rng) ? lo(rng) : hi(rng)), t(rng), cv::LINE_AA);
     }
 }
 
 }  // namespace
+
+void addNoise(cv::Mat& img, double sigma, cv::RNG& rng) {
+    cv::Mat noise(img.size(), CV_MAKETYPE(CV_32F, img.channels()));
+    rng.fill(noise, cv::RNG::NORMAL, cv::Scalar::all(0), cv::Scalar::all(sigma));
+    cv::Mat f;
+    img.convertTo(f, noise.type());
+    cv::Mat(f + noise).convertTo(img, img.type());  // saturating conversion back to 8 bits
+}
 
 cv::Mat texture(cv::Size size, std::uint32_t seed) {
     std::mt19937 rng(seed);
@@ -124,15 +137,9 @@ StereoScene layeredStereo(cv::Size size, int maxDisparity, std::uint32_t seed) {
             }
         }
     // Mild sensor noise, different in each view.
-    std::mt19937 rng(seed + 99);
-    cv::Mat n(size, CV_16SC3);
-    cv::randn(n, 0, 2);
-    cv::Mat l16, r16;
-    s.left.convertTo(l16, CV_16SC3);
-    s.right.convertTo(r16, CV_16SC3);
-    cv::Mat(l16 + n).convertTo(s.left, CV_8UC3);
-    cv::randn(n, 0, 2);
-    cv::Mat(r16 + n).convertTo(s.right, CV_8UC3);
+    cv::RNG rng(seed + 99);
+    addNoise(s.left, 2.0, rng);
+    addNoise(s.right, 2.0, rng);
     return s;
 }
 
@@ -187,7 +194,7 @@ MovingScene movingObject(cv::Size size, int nFrames, std::uint32_t seed) {
     cv::Mat tint(obj.size(), CV_8UC3, cv::Scalar(30, 90, 235));
     cv::addWeighted(obj, 0.35, tint, 0.65, 0, obj);  // warm-coloured object: easy for hue tracking
 
-    std::normal_distribution<double> noise(0.0, 1.0);
+    cv::RNG noiseRng(seed + 99);
     for (int t = 0; t < nFrames; ++t) {
         const double s = double(t) / std::max(1, nFrames - 1) * 2 * std::numbers::pi;
         const cv::Point centre(int(size.width * (0.5 + 0.33 * std::sin(s))),
@@ -201,11 +208,7 @@ MovingScene movingObject(cv::Size size, int nFrames, std::uint32_t seed) {
             obj(src).copyTo(frame(clip), objMask(src));
             objMask(src).copyTo(mask(clip));
         }
-        cv::Mat n(size, CV_16SC3);
-        cv::randn(n, 0, 3);
-        cv::Mat f16;
-        frame.convertTo(f16, CV_16SC3);
-        cv::Mat(f16 + n).convertTo(frame, CV_8UC3);
+        addNoise(frame, 3.0, noiseRng);
         m.frames.push_back(frame);
         m.masks.push_back(mask);
         m.boxes.push_back(clip);

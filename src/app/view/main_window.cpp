@@ -56,11 +56,15 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     cv->setContentsMargins(0, 0, 0, 0);
     cv->setSpacing(0);
 
+    // Header, two rows: the title and the picture tools, then the view tabs and the run status.
+    // Tabs get the full width of the canvas, so many views never widen the window.
     auto* header = new QWidget;
     header->setObjectName(QStringLiteral("header"));
-    auto* hh = new QHBoxLayout(header);
-    hh->setContentsMargins(22, 14, 16, 12);
-    hh->setSpacing(10);
+    auto* hv = new QVBoxLayout(header);
+    hv->setContentsMargins(22, 14, 16, 10);
+    hv->setSpacing(10);
+    auto* top = new QHBoxLayout;
+    top->setSpacing(8);
     auto* titles = new QVBoxLayout;
     titles->setSpacing(1);
     crumb_ = new QLabel;
@@ -69,19 +73,13 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     title_->setObjectName(QStringLiteral("title"));
     titles->addWidget(crumb_);
     titles->addWidget(title_);
-    hh->addLayout(titles);
-    hh->addSpacing(18);
-    tabs_ = new QWidget;
-    tabs_->setObjectName(QStringLiteral("segmented"));
-    tabsLayout_ = new QHBoxLayout(tabs_);
-    tabsLayout_->setContentsMargins(0, 0, 0, 0);
-    tabsLayout_->setSpacing(0);
-    tabGroup_ = new QButtonGroup(this);
-    hh->addWidget(tabs_, 0, Qt::AlignVCenter);
-    hh->addStretch(1);
-    busyLabel_ = new QLabel;
-    busyLabel_->setObjectName(QStringLiteral("busy"));
-    hh->addWidget(busyLabel_);
+    top->addLayout(titles, 1);
+    // The number that judges the result stays next to the picture, even when the inspector scrolls.
+    headline_ = new QLabel;
+    headline_->setObjectName(QStringLiteral("headline"));
+    headline_->setTextFormat(Qt::RichText);
+    top->addWidget(headline_);
+    top->addSpacing(10);
     zoom_ = new QLabel;
     zoom_->setObjectName(QStringLiteral("zoom"));
     zoom_->setMinimumWidth(44);
@@ -97,10 +95,29 @@ MainWindow::MainWindow(const Document& doc, QWidget* parent) : QMainWindow(paren
     fit_ = tool(tr("Fit"), tr("Fit the picture (F, or double-click)"));
     one_ = tool(tr("1:1"), tr("One image pixel per screen pixel"));
     export_ = tool(tr("Export"), tr("Save the picture with its overlays as PNG (Ctrl+E)"));
-    hh->addWidget(zoom_);
-    hh->addWidget(fit_);
-    hh->addWidget(one_);
-    hh->addWidget(export_);
+    top->addWidget(zoom_);
+    top->addWidget(fit_);
+    top->addWidget(one_);
+    top->addWidget(export_);
+    hv->addLayout(top);
+
+    auto* second = new QHBoxLayout;
+    second->setSpacing(12);
+    tabs_ = new QWidget;
+    tabs_->setObjectName(QStringLiteral("segmented"));
+    tabsLayout_ = new QHBoxLayout(tabs_);
+    tabsLayout_->setContentsMargins(0, 0, 0, 0);
+    tabsLayout_->setSpacing(0);
+    tabGroup_ = new QButtonGroup(this);
+    second->addWidget(tabs_);
+    second->addStretch(1);
+    busyLabel_ = new QLabel;
+    busyLabel_->setObjectName(QStringLiteral("busy"));
+    busyLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);  // long messages never push the layout
+    busyLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    second->addWidget(busyLabel_, 1);
+
+    hv->addLayout(second);
     cv->addWidget(header);
 
     progress_ = new QProgressBar;
@@ -210,12 +227,18 @@ void MainWindow::showOutput(bool keepZoom) {
             canvas_->show(nullptr, nullptr, keepZoom);
         }
         if (video && s.inputs) timeline_->setFrames(0, int(s.inputs->images.size()), s.inputs->fps);
+        headline_->clear();
         inspector_->setResult(s);
         return;
     }
     const auto& frames = s.output->frames;
     const auto& frame = frames[std::min<size_t>(size_t(s.frame), frames.size() - 1)];
-    const int view = std::min(s.view, int(frame.views.size()) - 1);
+    const int view = std::clamp(s.view, 0, int(frame.views.size()) - 1);
+    QString headline;
+    for (const auto& st : s.output->stats)
+        if (st.emphasis) headline = QStringLiteral("<span style='color:#9aa4b2'>%1</span>&nbsp;&nbsp;<b>%2</b>")
+                                        .arg(st.label.toHtmlEscaped(), st.value.toHtmlEscaped());
+    headline_->setText(headline);
     const std::vector<Shape>* extra = nullptr;
     for (const auto& cs : s.clickShapes)
         if (cs.view == view) extra = &cs.shapes;

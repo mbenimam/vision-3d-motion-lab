@@ -79,8 +79,9 @@ void Canvas::show(const View* view, const std::vector<vl::app::Shape>* extra, bo
         legend_.reset();
         return;
     }
-    const QSize newSize = view->image.size();
-    pixmap_->setPixmap(QPixmap::fromImage(view->image));
+    const QImage picture = view->picture();
+    const QSize newSize = picture.size();
+    pixmap_->setPixmap(QPixmap::fromImage(picture));
     // Sharp pixels when zoomed in: that is how one sees a disparity step or a block of the flow.
     pixmap_->setTransformationMode(zoom() > 2.0 ? Qt::FastTransformation : Qt::SmoothTransformation);
     scene_->setSceneRect(QRectF(QPointF(0, 0), QSizeF(newSize)).adjusted(-40, -40, 40, 40));
@@ -323,6 +324,19 @@ void Canvas::drawForeground(QPainter* p, const QRectF&) {
     QFont f = font();
     f.setPointSizeF(f.pointSizeF() * 0.85);
     p->setFont(f);
+    if (!legend_->key.isNull()) {  // a picture key: drawn square, label underneath
+        const int side = 96, pad = 10;
+        const int w = std::max(side, QFontMetrics(f).horizontalAdvance(legend_->label));
+        const QRect box(14, viewport()->height() - side - 44, w + 2 * pad, side + 34);
+        p->setPen(QColor(0x2c, 0x35, 0x46));
+        p->setBrush(QColor(14, 17, 23, 215));
+        p->drawRoundedRect(box, 6, 6);
+        p->drawImage(QRect(box.left() + pad + (w - side) / 2, box.top() + pad, side, side), legend_->key);
+        p->setPen(QColor(0x9a, 0xa4, 0xb2));
+        p->drawText(QRect(box.left() + pad, box.bottom() - 22, w, 16), Qt::AlignCenter, legend_->label);
+        p->restore();
+        return;
+    }
     const int w = std::max(180, QFontMetrics(f).horizontalAdvance(legend_->label) + 4), barH = 8, pad = 10;
     const QRect box(14, viewport()->height() - 64, w + 2 * pad, 50);
     p->setPen(QColor(0x2c, 0x35, 0x46));

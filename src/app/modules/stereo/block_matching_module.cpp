@@ -22,7 +22,7 @@ public:
                                "windows look most alike."),
                 QStringLiteral("switch the cost from SAD to ZNCC on <i>Cones</i>, then grow the window and watch thin "
                                "objects swell while noise disappears."),
-                InputKind::ImagePair, 300};
+                InputKind::ImagePair, 300, QStringLiteral("Disparity")};
     }
 
     std::vector<ParamSpec> params() const override {

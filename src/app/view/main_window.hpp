@@ -64,6 +64,7 @@ private:
     QProgressBar* progress_;
     QLabel* status_;
     QLabel* busyLabel_;
+    QLabel* headline_;
 };
 
 }  // namespace vl::app

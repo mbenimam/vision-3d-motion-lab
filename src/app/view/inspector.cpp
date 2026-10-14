@@ -43,6 +43,7 @@ public:
         auto* head = new QHBoxLayout;
         auto* label = new QLabel(spec.label);
         label->setObjectName(QStringLiteral("paramLabel"));
+        label->setWordWrap(true);
         head->addWidget(label, 1);
         value_ = new QLabel(this);
         value_->setObjectName(QStringLiteral("paramValue"));
@@ -64,7 +65,8 @@ public:
             break;
         }
         case ParamSpec::Kind::Choice: {
-            if (spec.choices.size() <= 4) {
+            // All options visible in one row when they fit the panel; otherwise a combo box.
+            if (spec.choices.size() <= 4 && spec.choices.join(QString()).size() <= 30) {
                 v->addLayout(head);
                 auto* seg = new QWidget;
                 seg->setObjectName(QStringLiteral("segmented"));
@@ -87,6 +89,8 @@ public:
             } else {
                 v->addLayout(head);
                 combo_ = new QComboBox;
+                combo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+                combo_->setMinimumContentsLength(12);
                 combo_->addItems(spec.choices);
                 v->addWidget(combo_);
                 connect(combo_, &QComboBox::currentIndexChanged, this, [this](int i) {
@@ -193,6 +197,7 @@ Inspector::Inspector(QWidget* parent) : QScrollArea(parent) {
     setFrameShape(NoFrame);
     auto* body = new QWidget;
     body->setObjectName(QStringLiteral("inspectorBody"));
+    body->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     layout_ = new QVBoxLayout(body);
     layout_->setContentsMargins(20, 18, 18, 24);
     layout_->setSpacing(0);
@@ -221,6 +226,8 @@ Inspector::Inspector(QWidget* parent) : QScrollArea(parent) {
     auto* input = section(tr("Input"), open_);
     auto* inL = static_cast<QVBoxLayout*>(input->layout());
     samples_ = new QComboBox;
+    samples_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);  // long names never widen the panel
+    samples_->setMinimumContentsLength(12);
     inL->addWidget(samples_);
     boxTool_ = new QPushButton(tr("Draw the box to track"));
     boxTool_->setObjectName(QStringLiteral("secondary"));
@@ -360,6 +367,7 @@ void Inspector::setResult(const ModuleState& s) {
     for (const auto& st : stats) {
         auto* l = new QLabel(st.label);
         l->setObjectName(QStringLiteral("statLabel"));
+        l->setWordWrap(true);
         auto* v = new QLabel(st.value);
         v->setObjectName(st.emphasis ? QStringLiteral("statKey") : QStringLiteral("statValue"));
         v->setAlignment(Qt::AlignRight | Qt::AlignVCenter);

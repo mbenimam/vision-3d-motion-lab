@@ -58,6 +58,7 @@ struct Legend {
     QString label;            // "disparity (px)"
     double lo = 0, hi = 1;    // values at the two ends
     QString loText, hiText;   // optional text for the ends (default: the numbers)
+    QImage key;               // optional: a picture to show instead of the turbo bar (e.g. a colour wheel)
 };
 
 // One picture on the canvas. Coordinates of shapes are image pixels (x right, y down).
@@ -68,6 +69,11 @@ struct View {
     std::function<QString(QPoint)> probe;        // optional: text under the cursor ("d = 12.0 px")
     cv::Mat data;                                // optional: the values behind the picture (for onClick)
     std::optional<Legend> legend;                // optional: turbo colour scale (vl::colorize)
+    // Optional: draw the picture on demand instead of storing it. Video topics keep compact data per
+    // frame and render a view only when it is shown (a 300-frame clip with 5 views would otherwise
+    // hold 1500 pictures). Called on the UI thread; must be quick and must not touch shared state.
+    std::function<QImage()> render;
+    QImage picture() const { return image.isNull() && render ? render() : image; }
 };
 
 struct Stat {
@@ -152,6 +158,7 @@ public:
         QString tryHint;  // one concrete thing to do
         InputKind input = InputKind::Image;
         int order = 0;    // position in the navigation, ascending
+        QString defaultView;  // view shown first (by name), e.g. the result; empty = the first view
     };
 
     virtual ~Module() = default;

@@ -8,6 +8,7 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include "core/common/synthetic.hpp"
+#include "core/stereo/graphcut_stereo.hpp"
 
 namespace vl::app::stereo_samples {
 namespace {
@@ -24,7 +25,12 @@ Inputs middlebury(const QString& name, const QString& dir) {
     std::ifstream(base.toStdString() + "/scale.txt") >> scale;
     cv::Mat truth;
     raw.convertTo(truth, CV_32F, 1.0 / scale);
-    in.truth = {truth, cv::Mat()};
+    // Middlebury gives no occlusion map: derive it from the true disparities (a left pixel is hidden
+    // when a nearer surface lands on its partner), so every stereo topic scores the same pixels.
+    cv::Mat visible;
+    cv::bitwise_not(vl::stereo::occlusionsFromDisparity(truth), visible);
+    visible.setTo(0, truth <= 0);
+    in.truth = {truth, visible};
     return in;
 }
 

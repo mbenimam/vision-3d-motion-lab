@@ -43,6 +43,9 @@ struct MovingScene {
 // object moving along a Lissajous path. Good for background subtraction and tracking.
 MovingScene movingObject(cv::Size size, int nFrames, std::uint32_t seed);
 
+// Add Gaussian noise of standard deviation sigma (grey levels) in place, deterministically from rng.
+void addNoise(cv::Mat& img8u, double sigma, cv::RNG& rng);
+
 // Backward warp: out(x) = img(x + flow(x)), bilinear, border replicated.
 cv::Mat warpBackward(const cv::Mat& img, const cv::Mat& flow);
 

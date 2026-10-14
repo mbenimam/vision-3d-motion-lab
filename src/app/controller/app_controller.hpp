@@ -31,6 +31,7 @@ public:
     void click(QPointF pixel);
     void whenIdle(std::function<void()> fn);  // runs once, after the next completed result
     void recompute(int delayMs);
+    void syncInspector();  // show the model's parameter values (after changes made outside the panel)
 
 private:
     void chooseModule(int index);
