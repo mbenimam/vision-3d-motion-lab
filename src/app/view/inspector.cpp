@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
+#include <array>
+
 #include <QButtonGroup>
+#include <QStyle>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QGridLayout>
@@ -154,6 +157,11 @@ private:
 class Sparkline : public QWidget {
 public:
     Sparkline(const Series& s, QWidget* parent = nullptr) : QWidget(parent), s_(s) { setFixedHeight(54); }
+    const QString& label() const { return s_.label; }
+    void setSeries(const Series& s) {
+        s_ = s;
+        update();  // repaint in place: no widget is created or destroyed while a video plays
+    }
 
 protected:
     void paintEvent(QPaintEvent*) override {
@@ -350,46 +358,65 @@ void Inspector::setBoxToolChecked(bool on) {
     boxHint_->setVisible(on);
 }
 
+// Called for every new result and, while a video plays, for every frame. Rows are updated in place
+// when the set of rows is unchanged (no widget churn, so nothing flickers); they are rebuilt only when
+// the rows themselves change (another topic, comparison switched on or off).
 void Inspector::setResult(const ModuleState& s) {
-    while (auto* item = statsGrid_->takeAt(0)) {
-        delete item->widget();
-        delete item;
-    }
-    while (auto* item = seriesLayout_->takeAt(0)) {
-        delete item->widget();
-        delete item;
-    }
     error_->setText(s.error);
     error_->setVisible(!s.error.isEmpty());
 
-    while (auto* item = compareGrid_->takeAt(0)) {
-        delete item->widget();
-        delete item;
-    }
-    const bool hasComparison = s.output && !s.output->comparison.empty();
-    compareBox_->setVisible(hasComparison);
-    if (hasComparison) {
+    // Ours vs OpenCV.
+    std::vector<std::array<QString, 4>> compareRows;  // metric, ours, OpenCV, which wins ("ours"/"opencv"/"")
+    if (s.output)
+        for (const auto& c : s.output->comparison) {
+            const bool tie = std::abs(c.ours - c.opencv) < 0.5 * std::pow(10.0, -c.decimals);
+            const bool oursWins = !tie && ((c.ours < c.opencv) == c.lowerIsBetter);
+            compareRows.push_back({c.metric, fmt(c.ours, c.decimals) + c.unit, fmt(c.opencv, c.decimals) + c.unit,
+                                   tie ? QString() : oursWins ? QStringLiteral("ours") : QStringLiteral("opencv")});
+        }
+    compareBox_->setVisible(!compareRows.empty());
+    bool sameCompare = compareCells_.size() == compareRows.size();
+    for (size_t i = 0; sameCompare && i < compareRows.size(); ++i) sameCompare = compareCells_[i][0]->text() == compareRows[i][0];
+    if (!sameCompare) {
+        while (auto* item = compareGrid_->takeAt(0)) {
+            delete item->widget();
+            delete item;
+        }
+        compareCells_.clear();
         auto cell = [this](const QString& text, const char* name, int r, int c, Qt::Alignment a) {
             auto* l = new QLabel(text);
             l->setObjectName(QString::fromLatin1(name));
             l->setWordWrap(c == 0);
             compareGrid_->addWidget(l, r, c, a);
+            return l;
         };
-        cell({}, "compareHead", 0, 0, Qt::AlignLeft);
-        cell(tr("Ours"), "compareHead", 0, 1, Qt::AlignRight);
-        cell(tr("OpenCV"), "compareHead", 0, 2, Qt::AlignRight);
-        int r = 1;
-        for (const auto& c : s.output->comparison) {
-            const bool tie = std::abs(c.ours - c.opencv) < 0.5 * std::pow(10.0, -c.decimals);
-            const bool oursWins = !tie && ((c.ours < c.opencv) == c.lowerIsBetter);
-            cell(c.metric, "statLabel", r, 0, Qt::AlignLeft);
-            cell(fmt(c.ours, c.decimals) + c.unit, tie ? "statValue" : oursWins ? "winner" : "statValue", r, 1, Qt::AlignRight);
-            cell(fmt(c.opencv, c.decimals) + c.unit, tie ? "statValue" : oursWins ? "statValue" : "winner", r, 2, Qt::AlignRight);
-            ++r;
+        if (!compareRows.empty()) {
+            cell({}, "compareHead", 0, 0, Qt::AlignLeft);
+            cell(tr("Ours"), "compareHead", 0, 1, Qt::AlignRight);
+            cell(tr("OpenCV"), "compareHead", 0, 2, Qt::AlignRight);
+        }
+        for (size_t i = 0; i < compareRows.size(); ++i) {
+            const int r = int(i) + 1;
+            compareCells_.push_back({cell(compareRows[i][0], "statLabel", r, 0, Qt::AlignLeft),
+                                     cell({}, "statValue", r, 1, Qt::AlignRight), cell({}, "statValue", r, 2, Qt::AlignRight)});
         }
         compareGrid_->setColumnStretch(0, 1);
     }
+    for (size_t i = 0; i < compareRows.size(); ++i) {
+        for (int k = 1; k <= 2; ++k) {
+            QLabel* l = compareCells_[i][size_t(k)];
+            l->setText(compareRows[i][size_t(k)]);
+            const bool wins = compareRows[i][3] == (k == 1 ? QStringLiteral("ours") : QStringLiteral("opencv"));
+            const QString name = wins ? QStringLiteral("winner") : QStringLiteral("statValue");
+            if (l->objectName() != name) {
+                l->setObjectName(name);
+                l->style()->unpolish(l);
+                l->style()->polish(l);
+            }
+        }
+    }
 
+    // Numbers of the result, then of the current frame.
     std::vector<Stat> stats;
     if (s.output) {
         stats = s.output->stats;
@@ -399,21 +426,49 @@ void Inspector::setResult(const ModuleState& s) {
         }
         if (s.lastRunMs > 0) stats.push_back({tr("Run time"), fmtMs(s.lastRunMs)});
     }
-    int row = 0;
-    for (const auto& st : stats) {
-        auto* l = new QLabel(st.label);
-        l->setObjectName(QStringLiteral("statLabel"));
-        l->setWordWrap(true);
-        auto* v = new QLabel(st.value);
-        v->setObjectName(st.emphasis ? QStringLiteral("statKey") : QStringLiteral("statValue"));
-        v->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        v->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        statsGrid_->addWidget(l, row, 0);
-        statsGrid_->addWidget(v, row, 1);
-        ++row;
+    bool sameStats = statRows_.size() == stats.size();
+    for (size_t i = 0; sameStats && i < stats.size(); ++i)
+        sameStats = statRows_[i].first->text() == stats[i].label &&
+                    (statRows_[i].second->objectName() == QStringLiteral("statKey")) == stats[i].emphasis;
+    if (!sameStats) {
+        while (auto* item = statsGrid_->takeAt(0)) {
+            delete item->widget();
+            delete item;
+        }
+        statRows_.clear();
+        for (size_t i = 0; i < stats.size(); ++i) {
+            auto* l = new QLabel(stats[i].label);
+            l->setObjectName(QStringLiteral("statLabel"));
+            l->setWordWrap(true);
+            auto* v = new QLabel;
+            v->setObjectName(stats[i].emphasis ? QStringLiteral("statKey") : QStringLiteral("statValue"));
+            v->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            v->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            statsGrid_->addWidget(l, int(i), 0);
+            statsGrid_->addWidget(v, int(i), 1);
+            statRows_.emplace_back(l, v);
+        }
     }
-    if (s.output)
-        for (const auto& series : s.output->series) seriesLayout_->addWidget(new Sparkline(series));
+    for (size_t i = 0; i < stats.size(); ++i) statRows_[i].second->setText(stats[i].value);
+
+    // Sparklines.
+    const std::vector<Series> series = s.output ? s.output->series : std::vector<Series>{};
+    bool sameSeries = sparks_.size() == series.size();
+    for (size_t i = 0; sameSeries && i < series.size(); ++i) sameSeries = sparks_[i]->label() == series[i].label;
+    if (!sameSeries) {
+        while (auto* item = seriesLayout_->takeAt(0)) {
+            delete item->widget();
+            delete item;
+        }
+        sparks_.clear();
+        for (const auto& se : series) {
+            sparks_.push_back(new Sparkline(se));
+            seriesLayout_->addWidget(sparks_.back());
+        }
+    } else {
+        for (size_t i = 0; i < series.size(); ++i) sparks_[i]->setSeries(series[i]);
+    }
+
     note_->setText(s.output ? s.output->note : QString());
     note_->setVisible(!note_->text().isEmpty());
     statsBox_->setVisible(s.output || !s.error.isEmpty());

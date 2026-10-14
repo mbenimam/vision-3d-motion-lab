@@ -2,7 +2,9 @@
 // The right panel, read top to bottom: what the topic is, what to try, which input, the
 // parameters (built from the module's ParamSpecs), then the numbers the last run produced.
 
+#include <array>
 #include <map>
+#include <vector>
 
 #include <QScrollArea>
 
@@ -55,6 +57,9 @@ private:
     QGridLayout* statsGrid_;
     QWidget* compareBox_;
     QGridLayout* compareGrid_;
+    std::vector<std::array<QLabel*, 3>> compareCells_;
+    std::vector<std::pair<QLabel*, QLabel*>> statRows_;
+    std::vector<Sparkline*> sparks_;
     QVBoxLayout* seriesLayout_;
     QLabel* note_;
     QLabel* error_;

@@ -153,8 +153,10 @@ void addSideBySideViews(Output& out) {
             if (ours == frame.views.end()) continue;
             View pair;
             pair.name = name + QStringLiteral(" · ours | OpenCV");
-            // Our overlays stay on the left half; the right half starts after a 12-pixel gap.
+            // Each half keeps its own overlays; the right half starts after a 12-pixel gap.
             pair.shapes = ours->shapes;
+            const QSize leftSize = ours->picture().size();
+            for (const auto& s : theirs.shapes) pair.shapes.push_back(translated(s, QPointF(leftSize.width() + 12, 0)));
             const View a = *ours, b = theirs;
             pair.render = [a, b] {
                 const QImage left = a.picture(), right = b.picture();
@@ -184,6 +186,71 @@ void addSideBySideViews(Output& out) {
         }
         for (auto& v : extra) frame.views.push_back(std::move(v));
     }
+}
+
+Shape translated(const Shape& shape, QPointF by) {
+    return std::visit(
+        [&](auto s) -> Shape {
+            using T = std::decay_t<decltype(s)>;
+            if constexpr (std::is_same_v<T, LineShape>) s.line.translate(by);
+            else if constexpr (std::is_same_v<T, PolylineShape> || std::is_same_v<T, PointsShape>) s.points.translate(by);
+            else if constexpr (std::is_same_v<T, RectShape>) s.rect.translate(by);
+            else if constexpr (std::is_same_v<T, EllipseShape>) s.centre += by;
+            else if constexpr (std::is_same_v<T, ArrowsShape>) { for (auto& a : s.arrows) a.translate(by); }
+            else if constexpr (std::is_same_v<T, LabelShape>) s.at += by;
+            return s;
+        },
+        shape);
+}
+
+void addInputViews(Output& out, const InputsPtr& inputs, InputKind kind) {
+    if (!inputs || inputs->images.empty()) return;
+    for (size_t i = 0; i < out.frames.size(); ++i) {
+        View input;
+        input.name = QObject::tr("Input");
+        if (kind == InputKind::Video) {
+            const cv::Mat frame = inputs->images[std::min(i, inputs->images.size() - 1)];
+            input.render = [frame] { return toQImage(frame); };
+        } else if (kind == InputKind::Image || inputs->images.size() == 1) {
+            input.image = toQImage(inputs->images.front());
+        } else {
+            // A pair (or a few images): side by side, numbered, so both inputs are seen at once.
+            const InputsPtr in = inputs;
+            input.render = [in] {
+                const int gap = 12;
+                int width = 0, height = 0;
+                for (const auto& m : in->images) {
+                    width += m.cols + gap;
+                    height = std::max(height, m.rows);
+                }
+                QImage all(width - gap, height, QImage::Format_RGB888);
+                all.fill(QColor(0x0b, 0x0e, 0x14));
+                QPainter p(&all);
+                QFont f = p.font();
+                f.setBold(true);
+                f.setPixelSize(std::max(11, height / 28));
+                p.setFont(f);
+                int x = 0;
+                for (size_t k = 0; k < in->images.size(); ++k) {
+                    p.drawImage(x, 0, toQImage(in->images[k]));
+                    const QString tag = QString::number(k + 1);
+                    const QRect r = p.fontMetrics().boundingRect(tag).adjusted(-6, -3, 6, 3);
+                    p.fillRect(r.translated(x + 8 - r.left(), 8 - r.top()), QColor(14, 17, 23, 210));
+                    p.setPen(QColor(0xff, 0xcf, 0x66));
+                    p.drawText(x + 14, 8 - r.top() - 3, tag);
+                    x += in->images[k].cols + gap;
+                }
+                return all;
+            };
+        }
+        out.frames[i].views.insert(out.frames[i].views.begin(), std::move(input));
+    }
+}
+
+std::vector<QPointF> handlesParam(const Params& p) {
+    std::vector<QPointF> out;
+    for (const QVariant& v : p.value(QStringLiteral("handles")).toList()) out.push_back(v.toPointF());
+    return out;
 }
 
 }  // namespace vl::app

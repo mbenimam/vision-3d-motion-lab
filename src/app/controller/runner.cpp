@@ -62,10 +62,15 @@ void Runner::launch() {
             if (self && gen == self->generation_) emit self->progress(f, QString::fromStdString(msg));
         }, Qt::QueuedConnection);
     };
-    ctx.partial = [=](OutputPtr out) {
+    const InputKind kind = module->info().input;
+    ctx.partial = [=](OutputPtr partialOut) {
         const qint64 now = clock->elapsed();
         if (now - lastPartial->load() < 150) return;
         lastPartial->store(now);
+        // Same view order as the final result (Input first), so the tab the user is on stays put.
+        Output withInput = *partialOut;
+        addInputViews(withInput, inputs, kind);
+        const OutputPtr out = std::make_shared<const Output>(std::move(withInput));
         QMetaObject::invokeMethod(self, [=] {
             if (self && gen == self->generation_) emit self->partial(out);
         }, Qt::QueuedConnection);
@@ -79,6 +84,7 @@ void Runner::launch() {
         try {
             Output result = module->compute(*inputs, params, ctx);
             if (ctx.compare) addSideBySideViews(result);
+            addInputViews(result, inputs, module->info().input);
             out = std::make_shared<const Output>(std::move(result));
         } catch (const vl::Cancelled&) {
             cancelled = true;

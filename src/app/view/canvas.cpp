@@ -7,6 +7,7 @@
 #include <QGraphicsLineItem>
 #include <QGraphicsPathItem>
 #include <QGraphicsPixmapItem>
+#include <QGraphicsPolygonItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
 #include <QGraphicsSimpleTextItem>
@@ -77,6 +78,8 @@ void Canvas::show(const View* view, const std::vector<vl::app::Shape>* extra, bo
         rebuildOverlays({}, nullptr);
         probe_ = {};
         legend_.reset();
+        handles_.clear();
+        rebuildHandles();
         return;
     }
     const QImage picture = view->picture();
@@ -88,6 +91,10 @@ void Canvas::show(const View* view, const std::vector<vl::app::Shape>* extra, bo
     rebuildOverlays(view->shapes, extra);
     probe_ = view->probe;
     legend_ = view->legend;
+    if (draggedHandle_ < 0) {  // never replace the points under the user's mouse
+        handles_ = view->handles;
+        rebuildHandles();
+    }
     viewport()->update();
     if (!keepZoom || newSize != imageSize_ || fitted_) {
         imageSize_ = newSize;
@@ -175,6 +182,38 @@ void Canvas::rebuildOverlays(const std::vector<vl::app::Shape>& shapes, const st
         for (const auto& s : *extra) add(s);
 }
 
+// Handles: a closed outline through the points and a ring on each, drawn at a fixed screen size.
+void Canvas::rebuildHandles() {
+    delete handleItems_;
+    handleItems_ = nullptr;
+    if (handles_.empty()) return;
+    handleItems_ = new QGraphicsItemGroup;
+    handleItems_->setZValue(20);
+    scene_->addItem(handleItems_);
+    QPolygonF outline;
+    for (const QPointF& h : handles_) outline << h;
+    auto* poly = new QGraphicsPolygonItem(outline);
+    poly->setPen(cosmetic({colors::accent, 2.0, false}));
+    poly->setBrush(QColor(255, 176, 0, 28));
+    handleItems_->addToGroup(poly);
+    for (const QPointF& h : handles_) {
+        auto* ring = new QGraphicsEllipseItem(-8, -8, 16, 16);
+        ring->setPos(h);
+        ring->setFlag(QGraphicsItem::ItemIgnoresTransformations);
+        ring->setBrush(QColor(14, 17, 23, 180));
+        QPen pen(colors::accent, 2.5);
+        pen.setCosmetic(true);
+        ring->setPen(pen);
+        handleItems_->addToGroup(ring);
+    }
+}
+
+int Canvas::handleAt(QPoint viewportPos) const {
+    for (int i = 0; i < int(handles_.size()); ++i)
+        if (QLineF(QPointF(mapFromScene(handles_[size_t(i)])), QPointF(viewportPos)).length() <= 12) return i;
+    return -1;
+}
+
 void Canvas::setBoxTool(bool on) {
     boxTool_ = on;
     viewport()->setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
@@ -240,6 +279,7 @@ void Canvas::mousePressEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return QGraphicsView::mousePressEvent(e);
     pressPos_ = e->position().toPoint();
     dragging_ = false;
+    draggedHandle_ = boxTool_ ? -1 : handleAt(pressPos_);
     if (boxTool_) {
         boxStart_ = mapToScene(pressPos_);
         box_->setRect(QRectF(boxStart_, boxStart_));
@@ -252,7 +292,12 @@ void Canvas::mouseMoveEvent(QMouseEvent* e) {
     const QPoint pos = e->position().toPoint();
     if (e->buttons() & Qt::LeftButton) {
         if (!dragging_ && (pos - pressPos_).manhattanLength() > 4) dragging_ = true;
-        if (dragging_ && boxTool_) {
+        if (draggedHandle_ >= 0) {
+            const QPointF p = mapToScene(pos);
+            handles_[size_t(draggedHandle_)] = QPointF(std::clamp(p.x(), 0.0, double(imageSize_.width())),
+                                                       std::clamp(p.y(), 0.0, double(imageSize_.height())));
+            rebuildHandles();
+        } else if (dragging_ && boxTool_) {
             box_->setRect(QRectF(boxStart_, mapToScene(pos)).normalized());
         } else if (dragging_) {
             const QPoint delta = pos - pressPos_;
@@ -263,6 +308,8 @@ void Canvas::mouseMoveEvent(QMouseEvent* e) {
             viewport()->setCursor(Qt::ClosedHandCursor);
         }
     }
+    if (!(e->buttons() & Qt::LeftButton) && !boxTool_)
+        viewport()->setCursor(handleAt(pos) >= 0 ? Qt::OpenHandCursor : Qt::ArrowCursor);
     const QPointF p = mapToScene(pos);
     const QPoint px(int(std::floor(p.x())), int(std::floor(p.y())));
     if (!imageSize_.isEmpty() && QRect(QPoint(0, 0), imageSize_).contains(px)) {
@@ -281,6 +328,12 @@ void Canvas::mouseReleaseEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return QGraphicsView::mouseReleaseEvent(e);
     viewport()->setCursor(boxTool_ ? Qt::CrossCursor : Qt::ArrowCursor);
     const QPointF p = mapToScene(e->position().toPoint());
+    if (draggedHandle_ >= 0) {
+        draggedHandle_ = -1;
+        if (dragging_) emit handlesMoved(handles_);
+        dragging_ = false;
+        return;
+    }
     if (boxTool_) {
         box_->hide();
         const QRectF r = QRectF(boxStart_, p).normalized() & QRectF(QPointF(0, 0), QSizeF(imageSize_));

@@ -32,6 +32,7 @@ public:
 signals:
     void clicked(QPointF pixel);
     void boxDrawn(QRectF pixel);
+    void handlesMoved(const std::vector<QPointF>& handles);
     void hover(const QString& text);
     void zoomChanged(double factor);
 
@@ -57,6 +58,11 @@ private:
     QLabel* message_;
     std::function<QString(QPoint)> probe_;
     std::optional<Legend> legend_;
+    void rebuildHandles();
+    int handleAt(QPoint viewportPos) const;
+    std::vector<QPointF> handles_;          // draggable points of the current view, image pixels
+    QGraphicsItemGroup* handleItems_ = nullptr;
+    int draggedHandle_ = -1;
     QSize imageSize_;
     bool fitted_ = true;   // stay fitted on resize until the user zooms
     bool boxTool_ = false;

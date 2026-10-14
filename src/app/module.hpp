@@ -74,6 +74,9 @@ struct View {
     // hold 1500 pictures). Called on the UI thread; must be quick and must not touch shared state.
     std::function<QImage()> render;
     QImage picture() const { return image.isNull() && render ? render() : image; }
+    // Optional: points the user can drag (a document's corners). On release the framework stores them
+    // in the parameter "handles" (a QVariantList of QPointF in this view's pixels) and recomputes.
+    std::vector<QPointF> handles;
 };
 
 struct Stat {
@@ -170,7 +173,7 @@ public:
         QString tryHint;  // one concrete thing to do
         InputKind input = InputKind::Image;
         int order = 0;    // position in the navigation, ascending
-        QString defaultView;  // view shown first (by name), e.g. the result; empty = the first view
+        QString defaultView;  // the view that holds the result (by name); topics open on "Input", the clean input
         QString baseline;     // the OpenCV method compared against, e.g. "cv::StereoSGBM"; empty = none
         QStringList sources;  // our implementation, repo-relative ("src/core/stereo/block_matching.cpp"),
                               // shown by the code reader next to the picture
@@ -217,5 +220,10 @@ QString dataFile(const QString& relative);
 // For every pair of views "X" and "OpenCV · X" of the same size, add a view "X · ours | OpenCV"
 // showing both side by side (drawn on demand). The runner calls it on compared results.
 void addSideBySideViews(Output& out);
+// Put the untouched input first in every frame: "Input" (one image, or the pair side by side, or the
+// video frame), with no overlays. Every topic opens on it; the method's views follow.
+void addInputViews(Output& out, const InputsPtr& inputs, InputKind kind);
+Shape translated(const Shape& s, QPointF by);
+std::vector<QPointF> handlesParam(const Params& p);  // the dragged handles, empty if none yet
 
 }  // namespace vl::app

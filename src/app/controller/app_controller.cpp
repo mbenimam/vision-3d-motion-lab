@@ -60,6 +60,11 @@ AppController::AppController(QObject* parent) : QObject(parent), doc_(std::make_
     connect(w, &MainWindow::codeRequested, this, &AppController::showCode);
     connect(w->timeline(), &Timeline::frameChosen, this, &AppController::setFrame);
     connect(w->canvas(), &Canvas::clicked, this, &AppController::click);
+    connect(w->canvas(), &Canvas::handlesMoved, this, [this](const std::vector<QPointF>& handles) {
+        QVariantList list;
+        for (const QPointF& h : handles) list.push_back(h);
+        setParam(QStringLiteral("handles"), list);
+    });
     connect(w->canvas(), &Canvas::boxDrawn, this, [this](QRectF r) {
         window_->canvas()->setBoxTool(false);
         window_->inspector()->setBoxToolChecked(false);
@@ -234,7 +239,18 @@ void AppController::click(QPointF pixel) {
 void AppController::refreshClickShapes() {
     const auto& s = doc_->current();
     if (!s.output || lastClick_.x() < 0) return;
-    doc_->setClickShapes(s.module->onClick(*s.output, s.frame, s.view, lastClick_));
+    if (s.view == 0) {  // the clean Input view takes no overlays
+        doc_->setClickShapes({});
+        return;
+    }
+    // Modules index their own views; the framework put "Input" in front of them. Hand the module its
+    // own output and shift the views of the shapes it returns.
+    Output own = *s.output;
+    for (auto& f : own.frames)
+        if (!f.views.empty()) f.views.erase(f.views.begin());
+    auto shapes = s.module->onClick(own, s.frame, s.view - 1, lastClick_);
+    for (auto& cs : shapes) ++cs.view;
+    doc_->setClickShapes(std::move(shapes));
 }
 
 void AppController::exportPicture() {
