@@ -1,8 +1,10 @@
 // Topic: tracking by detection with the generalised Hough transform (R-table indexed by gradient
 // orientation), optionally restricted to a search window and weighed by a Kalman prediction.
+// Baseline: cv::GeneralizedHoughBallard detecting the first box's template in every frame.
 
 #include <cmath>
 #include <numbers>
+#include <optional>
 
 #include <opencv2/imgproc.hpp>
 
@@ -11,6 +13,7 @@
 #include "app/modules/motion/tracking_common.hpp"
 #include "core/common/image.hpp"
 #include "core/motion/hough.hpp"
+#include "core/motion/opencv_baselines.hpp"
 
 namespace vl::app {
 namespace {
@@ -60,7 +63,10 @@ public:
                                "is the detection. No colour, and no need to start near the object."),
                 QStringLiteral("on <i>Synthetic: orange disc</i>, click a pixel of the Orientation view to see the "
                                "centres it votes for; then raise the gradient threshold to 20 and watch the peak thin."),
-                InputKind::Video, 610, QStringLiteral("Frame")};
+                InputKind::Video, 610, QStringLiteral("Frame"), QStringLiteral("cv::GeneralizedHoughBallard"),
+                {QStringLiteral("src/core/motion/hough.hpp"), QStringLiteral("src/core/motion/hough.cpp"),
+                 QStringLiteral("src/core/motion/kalman.hpp"), QStringLiteral("src/core/motion/kalman.cpp"),
+                 QStringLiteral("src/core/common/filters.cpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -103,10 +109,21 @@ public:
         sum.hasTruth = motion_samples::truthBox(in, 0).area() > 0;
         std::vector<TrackStep> steps;
         Stopwatch sw;
+        // The baseline: OpenCV's Ballard transform with the first box as template, the same orientation
+        // bins and gradient threshold, searching the same radius around its own previous detection
+        // (the whole frame when the radius is 0).
+        std::optional<opencv::BallardTracker> baseline;
+        if (ctx.compare)
+            baseline.emplace(vl::toBGR(in.images.front()), box0,
+                             opencv::BallardParams{tp.gradient.bins, tp.gradient.minMagnitude, tp.searchRadius, tp.lostRatio});
+        tracking::BaselineTrack theirs;
+        double oursMs = 0;
         for (size_t t = 0; t < in.images.size(); ++t) {
             ctx.check();
             const cv::Mat frame = vl::toBGR(in.images[t]);
+            const Stopwatch clock;
             const HoughTracker::Frame r = t == 0 ? tracker.first() : tracker.step(frame);
+            if (t > 0) oursMs += clock.ms();
             const TrackStep& s = r.step;
             steps.push_back(s);
             sum.score.push_back(100 * s.score);
@@ -145,6 +162,19 @@ public:
                 sum.iou.push_back(o);
                 f.stats.push_back({QStringLiteral("This frame: IoU"), fmt(o, 2)});
             }
+            if (baseline) {
+                opencv::BallardTracker::Step b;
+                b.box = box0;
+                if (t > 0) b = baseline->step(frame);
+                theirs.boxes.push_back(b.box);
+                theirs.ms += b.ms;
+                theirs.lost += b.lost;
+                if (truth.area() > 0) theirs.iou.push_back(iou(b.box, truth));
+                View opencvView = tracking::baselineView(v0.image, theirs, b.lost, truth);
+                if (t > 0 && tp.searchRadius > 0) opencvView.shapes.push_back(RectShape{tracking::toQ(b.search), Pen{colors::muted, 1.0, true}});
+                if (t > 0) opencvView.shapes.push_back(LabelShape{QPointF(b.box.br().x + 4, b.box.y), QStringLiteral("%1 votes").arg(b.votes, 0, 'f', 0), colors::info});
+                f.views.push_back(std::move(opencvView));
+            }
             f.stats.push_back({QStringLiteral("This frame: peak votes"), QStringLiteral("%1 of %2 (%3 %)").arg(r.peak, 0, 'f', 0).arg(entries, 0, 'f', 0).arg(100 * s.score, 0, 'f', 0)});
             if (s.lost) f.stats.push_back({QStringLiteral("This frame"), QStringLiteral("lost")});
             out.frames.push_back(std::move(f));
@@ -157,6 +187,7 @@ public:
             }
         }
         finish(out, sum, sw.ms(), entries);
+        if (baseline) tracking::compareRows(out, sum, oursMs, theirs, QStringLiteral("Time per frame"));
         if (entries < 30)
             note = QStringLiteral("Only %1 model pixels pass the gradient threshold: lower it, or draw a box on a "
                                   "more textured object.").arg(entries);

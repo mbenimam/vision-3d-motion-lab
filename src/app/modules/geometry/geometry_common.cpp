@@ -2,27 +2,80 @@
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <limits>
 
 #include "core/common/image.hpp"
+#include "core/common/task.hpp"
 #include "core/geometry/fundamental.hpp"
 
 namespace vl::app::geometry_common {
 
-Correspondences correspond(vl::geometry::FeatureCache& cache, const cv::Mat& imgA, const cv::Mat& imgB,
-                           const vl::geometry::MatchParams& mp, int maxFeatures, std::stop_token stop) {
-    const auto fa = cache.get(imgA, maxFeatures);
-    checkStop(stop);
-    const auto fb = cache.get(imgB, maxFeatures);
-    checkStop(stop);
-    Correspondences c;
-    c.featuresA = static_cast<int>(fa.keypoints.size());
-    c.featuresB = static_cast<int>(fb.keypoints.size());
-    for (const auto& m : vl::geometry::matchDescriptors(fa.descriptors, fb.descriptors, mp, stop)) {
-        c.a.emplace_back(fa.keypoints[size_t(m.a)].pt);
-        c.b.emplace_back(fb.keypoints[size_t(m.b)].pt);
+vl::geometry::Features FeatureCache::get(const cv::Mat& image, const vl::geometry::SiftParams& p,
+                                         std::stop_token stop, double& ms) {
+    auto same = [&](const Entry& e) {
+        return e.image.data == image.data && e.image.size() == image.size() && e.upsample == p.upsample &&
+               e.maxFeatures == p.maxFeatures;
+    };
+    {
+        std::lock_guard lock(mutex_);
+        for (const auto& e : entries_)
+            if (same(e)) {
+                ms = e.ms;
+                return e.features;
+            }
     }
+    // Outside the lock: two runs may detect in parallel.
+    const Stopwatch sw;
+    vl::geometry::Features f = vl::geometry::detectSift(image, p, stop);
+    ms = sw.ms();
+    std::lock_guard lock(mutex_);
+    entries_.push_front({image, p.upsample, p.maxFeatures, f, ms});
+    if (entries_.size() > 6) entries_.pop_back();
+    return f;
+}
+
+std::vector<vl::geometry::Features> detectAll(FeatureCache& cache, const std::vector<cv::Mat>& images,
+                                              const vl::geometry::SiftParams& p, std::stop_token stop,
+                                              std::vector<double>& ms) {
+    ms.assign(images.size(), 0.0);
+    std::vector<std::future<vl::geometry::Features>> jobs;
+    for (size_t i = 0; i < images.size(); ++i)
+        jobs.push_back(std::async(std::launch::async, [&, i] { return cache.get(images[i], p, stop, ms[i]); }));
+    std::vector<vl::geometry::Features> out;
+    for (auto& j : jobs) out.push_back(j.get());  // rethrows Cancelled
+    return out;
+}
+
+Correspondences correspond(const vl::geometry::Features& fa, const vl::geometry::Features& fb,
+                           const vl::geometry::MatchParams& mp, std::stop_token stop) {
+    const Stopwatch sw;
+    Correspondences c;
+    for (const auto& m : vl::geometry::matchDescriptors(fa.descriptors, fb.descriptors, mp, stop)) {
+        c.a.push_back(fa.keypoints[size_t(m.a)].pt);
+        c.b.push_back(fb.keypoints[size_t(m.b)].pt);
+    }
+    c.matchMs = sw.ms();
     return c;
+}
+
+void addKeypoints(std::vector<Shape>& out, const std::vector<vl::geometry::Keypoint>& keypoints, cv::Point2d offset,
+                  int max) {
+    // Keypoints come sorted by contrast only when capped; pick the strongest explicitly.
+    std::vector<size_t> order(keypoints.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(),
+                     [&](size_t a, size_t b) { return keypoints[a].contrast > keypoints[b].contrast; });
+    if (order.size() > size_t(max)) order.resize(size_t(max));
+    QColor c = colors::accent;
+    c.setAlpha(200);
+    for (size_t i : order) {
+        const auto& k = keypoints[i];
+        const QPointF centre = qp(k.pt + offset);
+        const double r = 2 * k.sigma;
+        out.push_back(EllipseShape{centre, r, r, 0, {c, 1.0}});
+        out.push_back(LineShape{QLineF(centre, centre + QPointF(r * std::cos(k.angle), r * std::sin(k.angle))), {c, 1.0}});
+    }
 }
 
 Strip sideBySide(const std::vector<cv::Mat>& images, int gap) {

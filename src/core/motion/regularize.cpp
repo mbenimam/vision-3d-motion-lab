@@ -1,139 +1,128 @@
+// Regularisation of a foreground mask: morphological filter and Potts MRF minimised by ICM
+// (see regularize.hpp). Course: "3D Vision and Motion", part 9.
+
 #include "core/motion/regularize.hpp"
 
 #include <algorithm>
 
-#include <opencv2/imgproc.hpp>
-
+#include "core/common/filters.hpp"
 #include "core/common/task.hpp"
 
 namespace vl::motion {
 
 cv::Mat alternatingSequentialFilter(const cv::Mat& mask, int order) {
     CV_Assert(mask.type() == CV_8U && order >= 1);
+    // Small discs first: each radius removes what is smaller than it, so the larger disc that
+    // follows never has to deal with the specks (that is what makes the sequence "alternating").
     cv::Mat m = mask.clone();
-    for (int r = 1; r <= order; ++r) {
-        const cv::Mat disc = cv::getStructuringElement(cv::MORPH_ELLIPSE, {2 * r + 1, 2 * r + 1});
-        cv::morphologyEx(m, m, cv::MORPH_OPEN, disc);
-        cv::morphologyEx(m, m, cv::MORPH_CLOSE, disc);
-    }
+    for (int r = 1; r <= order; ++r) m = vl::close(vl::open(m, r), r);
     return m;
 }
 
 cv::Mat detectionMargin(const cv::Mat& difference, const cv::Mat& threshold) {
     CV_Assert(difference.type() == CV_32F && threshold.type() == CV_32F && difference.size() == threshold.size());
     cv::Mat r(difference.size(), CV_32F);
-    for (int y = 0; y < r.rows; ++y) {
-        const float* d = difference.ptr<float>(y);
-        const float* t = threshold.ptr<float>(y);
-        float* o = r.ptr<float>(y);
-        for (int x = 0; x < r.cols; ++x) o[x] = d[x] / std::max(t[x], 1.f);
-    }
+    for (int y = 0; y < r.rows; ++y)
+        for (int x = 0; x < r.cols; ++x)
+            r.at<float>(y, x) = difference.at<float>(y, x) / std::max(threshold.at<float>(y, x), 1.f);
     return r;
 }
 
 namespace {
 
-// Data cost of label l at margin r: ½ (r − 2l)².
-inline double dataCost(float r, int l, float rMax) {
-    const double v = double(std::min(r, rMax)) - 2.0 * l;
+// The 8 neighbours t of a pixel s.
+constexpr int kNeighbours = 8;
+constexpr int kDx[kNeighbours] = {-1, 0, 1, -1, 1, -1, 0, 1};
+constexpr int kDy[kNeighbours] = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+// Data term of label l at margin r: ½ (r − 2l)². Its two values cross at r = 1, the threshold.
+double dataCost(float r, int l, double rMax) {
+    const double v = std::min(double(r), rMax) - 2.0 * l;
     return 0.5 * v * v;
 }
 
-// Labels as 0/1 bytes with a one-pixel border of "no neighbour" (2), so the inner loop has no tests.
-cv::Mat padded01(const cv::Mat& mask) {
-    cv::Mat out(mask.rows + 2, mask.cols + 2, CV_8U, cv::Scalar(2));
-    for (int y = 0; y < mask.rows; ++y) {
-        const uchar* s = mask.ptr<uchar>(y);
-        uchar* o = out.ptr<uchar>(y + 1) + 1;
-        for (int x = 0; x < mask.cols; ++x) o[x] = s[x] != 0;
+// Step 1: the part of U that depends on x_s, for x_s = 0 and x_s = 1:
+//   U_s(l) = ½ (r_s − 2l)² + β · #{t ~ s : x_t ≠ l}
+struct LocalEnergy {
+    double e0 = 0, e1 = 0;
+};
+
+LocalEnergy localEnergies(const cv::Mat& margin, const cv::Mat& x, int py, int px, const MrfParams& p) {
+    int ones = 0, zeros = 0;
+    for (int k = 0; k < kNeighbours; ++k) {
+        const int ny = py + kDy[k], nx = px + kDx[k];
+        if (ny < 0 || ny >= x.rows || nx < 0 || nx >= x.cols) continue;  // no neighbour beyond the edge
+        if (x.at<uchar>(ny, nx))
+            ++ones;
+        else
+            ++zeros;
     }
-    return out;
+    const float r = margin.at<float>(py, px);
+    return {dataCost(r, 0, p.rMax) + p.beta * ones, dataCost(r, 1, p.rMax) + p.beta * zeros};
+}
+
+// Step 2: one raster sweep. Each pixel takes the label of lower local energy (ties keep the current
+// label, so ICM cannot cycle). Only the pixel's data term and its 8 pair terms change, so U moves by
+// exactly e_new − e_old: the energy is kept up to date without recomputing it. Returns the moves.
+long icmSweep(const cv::Mat& margin, cv::Mat& x, const MrfParams& p, double& U) {
+    long moves = 0;
+    for (int y = 0; y < x.rows; ++y)
+        for (int px = 0; px < x.cols; ++px) {
+            const LocalEnergy e = localEnergies(margin, x, y, px, p);
+            const uchar current = x.at<uchar>(y, px);
+            const uchar best = e.e1 < e.e0 ? 1 : (e.e0 < e.e1 ? 0 : current);
+            if (best == current) continue;
+            U += best ? e.e1 - e.e0 : e.e0 - e.e1;
+            x.at<uchar>(y, px) = best;
+            ++moves;
+        }
+    return moves;
 }
 
 }  // namespace
 
 double mrfEnergy(const cv::Mat& margin, const cv::Mat& labels, const MrfParams& p) {
     CV_Assert(margin.type() == CV_32F && labels.type() == CV_8U && margin.size() == labels.size());
-    const float rMax = float(p.rMax);
     double data = 0;
-    long disagree = 0;
-    for (int y = 0; y < labels.rows; ++y) {
-        const float* r = margin.ptr<float>(y);
-        const uchar* l = labels.ptr<uchar>(y);
-        const uchar* below = y + 1 < labels.rows ? labels.ptr<uchar>(y + 1) : nullptr;
+    long disagreeing = 0;
+    for (int y = 0; y < labels.rows; ++y)
         for (int x = 0; x < labels.cols; ++x) {
-            const bool a = l[x] != 0;
-            data += dataCost(r[x], a, rMax);
-            // Each unordered pair once: right, and the three neighbours of the next row.
-            if (x + 1 < labels.cols) disagree += a != (l[x + 1] != 0);
-            if (below) {
-                disagree += a != (below[x] != 0);
-                if (x > 0) disagree += a != (below[x - 1] != 0);
-                if (x + 1 < labels.cols) disagree += a != (below[x + 1] != 0);
+            const bool l = labels.at<uchar>(y, x) != 0;
+            data += dataCost(margin.at<float>(y, x), l, p.rMax);
+            // Each unordered pair once: the neighbours after s in raster order (k = 4..7).
+            for (int k = 4; k < kNeighbours; ++k) {
+                const int ny = y + kDy[k], nx = x + kDx[k];
+                if (ny < labels.rows && nx >= 0 && nx < labels.cols) disagreeing += l != (labels.at<uchar>(ny, nx) != 0);
             }
         }
-    }
-    return data + p.beta * double(disagree);
+    return data + p.beta * double(disagreeing);
 }
 
 MrfResult icmPotts(const cv::Mat& margin, const cv::Mat& init, const MrfParams& p, std::stop_token stop) {
     CV_Assert(margin.type() == CV_32F && init.type() == CV_8U && margin.size() == init.size() && p.beta >= 0);
-    const int H = init.rows, W = init.cols;
-    const float rMax = float(p.rMax);
-    cv::Mat L = padded01(init);                      // (H+2)×(W+2), 0/1 inside, 2 on the border
-    cv::Mat dirty(H + 2, W + 2, CV_8U, cv::Scalar(1));  // pixels whose neighbourhood changed
-    std::vector<uchar> rowDirty(size_t(H + 2), 1);
-    MrfResult res;
-    double U = mrfEnergy(margin, init, p);
-    res.energy.push_back(U);
+    // Labels as 0/1.
+    cv::Mat x(init.size(), CV_8U);
+    for (int y = 0; y < x.rows; ++y)
+        for (int px = 0; px < x.cols; ++px) x.at<uchar>(y, px) = init.at<uchar>(y, px) != 0;
 
+    MrfResult res;
+    double U = mrfEnergy(margin, x, p);
+    res.energy.push_back(U);
+    // 3. Sweep until nothing moves.
     for (int sweep = 0; sweep < p.maxSweeps; ++sweep) {
         checkStop(stop);
-        long moved = 0;
-        std::vector<uchar> nextRows(size_t(H + 2), 0);
-        for (int y = 0; y < H; ++y) {
-            if (!rowDirty[size_t(y + 1)]) continue;
-            const float* r = margin.ptr<float>(y);
-            const uchar* up = L.ptr<uchar>(y);
-            uchar* mid = L.ptr<uchar>(y + 1);
-            const uchar* dn = L.ptr<uchar>(y + 2);
-            uchar* dirtyRow = dirty.ptr<uchar>(y + 1);
-            for (int x = 0; x < W; ++x) {
-                const int c = x + 1;
-                if (!dirtyRow[c]) continue;
-                dirtyRow[c] = 0;
-                // Neighbours labelled 1 and 0 (border cells count for neither).
-                int ones = 0, zeros = 0;
-                for (const uchar v : {up[c - 1], up[c], up[c + 1], mid[c - 1], mid[c + 1], dn[c - 1], dn[c], dn[c + 1]}) {
-                    ones += v == 1;
-                    zeros += v == 0;
-                }
-                const double e0 = dataCost(r[x], 0, rMax) + p.beta * ones;
-                const double e1 = dataCost(r[x], 1, rMax) + p.beta * zeros;
-                // Ties keep the current label, so a sweep can never cycle.
-                const uchar cur = mid[c];
-                const uchar best = e1 < e0 ? 1 : (e0 < e1 ? 0 : cur);
-                if (best == cur) continue;
-                // Only this pixel's data term and its 8 pair terms change: U moves by e_best − e_cur.
-                U += best ? e1 - e0 : e0 - e1;
-                mid[c] = best;
-                ++moved;
-                for (int dy = 0; dy < 3; ++dy) {
-                    uchar* d = dirty.ptr<uchar>(y + dy);
-                    d[c - 1] = d[c] = d[c + 1] = 1;
-                    nextRows[size_t(y + dy)] = 1;
-                }
-            }
-        }
-        rowDirty.swap(nextRows);
+        const long moves = icmSweep(margin, x, p, U);
         res.energy.push_back(U);
         res.sweeps = sweep + 1;
-        if (moved == 0) break;
+        if (moves == 0) break;
     }
-    res.mask = L(cv::Rect(1, 1, W, H)) * 255;
-    cv::Mat diff;
-    cv::compare(res.mask, cv::Mat(init != 0), diff, cv::CMP_NE);
-    res.changes = cv::countNonZero(diff);
+
+    res.mask.create(x.size(), CV_8U);
+    for (int y = 0; y < x.rows; ++y)
+        for (int px = 0; px < x.cols; ++px) {
+            res.mask.at<uchar>(y, px) = x.at<uchar>(y, px) ? 255 : 0;
+            res.changes += (x.at<uchar>(y, px) != 0) != (init.at<uchar>(y, px) != 0);
+        }
     return res;
 }
 

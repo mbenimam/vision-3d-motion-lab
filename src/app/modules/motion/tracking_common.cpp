@@ -77,4 +77,35 @@ void summarise(Output& out, const Summary& s, const QString& scoreLabel, double 
     out.series.push_back({scoreLabel + QStringLiteral(" per frame (%)"), s.score});
 }
 
+View baselineView(const QImage& frame, const BaselineTrack& b, bool lost, const cv::Rect2d& truth,
+                  const cv::RotatedRect& fitted) {
+    View v{QStringLiteral("OpenCV · Frame"), frame};
+    if (truth.area() > 0) v.shapes.push_back(RectShape{toQ(truth), Pen{colors::good, 1.2, true}});
+    QPolygonF path;
+    for (const auto& r : b.boxes) path << QPointF(r.x + 0.5 * r.width, r.y + 0.5 * r.height);
+    if (path.size() > 1) v.shapes.push_back(PolylineShape{path, Pen{colors::info, 1.2, false}, false});
+    if (fitted.size.area() > 0) {
+        cv::Point2f corners[4];
+        fitted.points(corners);
+        QPolygonF poly;
+        for (const auto& c : corners) poly << QPointF(c.x, c.y);
+        v.shapes.push_back(PolylineShape{poly, Pen{colors::info, 1.0, true}, true});
+    }
+    v.shapes.push_back(RectShape{toQ(b.boxes.back()), lost ? Pen{colors::bad, 2.0, true} : Pen{colors::info, 2.0, false}});
+    if (lost) v.shapes.push_back(LabelShape{QPointF(b.boxes.back().x, b.boxes.back().y - 16), QStringLiteral("OpenCV: lost"), colors::bad});
+    return v;
+}
+
+void compareRows(Output& out, const Summary& ours, double oursMs, const BaselineTrack& theirs, const QString& timeLabel) {
+    auto mean = [](const std::vector<double>& v) {
+        double t = 0;
+        for (double x : v) t += x;
+        return v.empty() ? 0.0 : t / double(v.size());
+    };
+    const double n = double(std::max<size_t>(1, ours.score.size()));
+    if (ours.hasTruth) out.comparison.push_back({QStringLiteral("Mean IoU with the true box"), mean(ours.iou), mean(theirs.iou), {}, 3, false});
+    out.comparison.push_back({QStringLiteral("Lost frames"), double(ours.lost), double(theirs.lost), {}, 0, true});
+    out.comparison.push_back({timeLabel, oursMs / n, theirs.ms / n, QStringLiteral(" ms"), 2});
+}
+
 }  // namespace vl::app::tracking

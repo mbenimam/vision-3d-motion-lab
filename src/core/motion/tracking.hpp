@@ -1,5 +1,6 @@
 #pragma once
-// Pieces shared by the trackers: the per-frame result, box helpers and the overlap score.
+// Pieces shared by the trackers (course "3D Vision and Motion", part 10): the per-frame result, box
+// helpers and the overlap score IoU(a, b) = area(a ∩ b) / area(a ∪ b).
 
 #include <vector>
 

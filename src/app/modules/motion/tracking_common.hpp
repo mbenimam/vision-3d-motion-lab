@@ -32,4 +32,21 @@ struct Summary {
 };
 void summarise(Output& out, const Summary& s, const QString& scoreLabel, double ms, bool iterations);
 
+// The OpenCV baseline's track, frame by frame, for the "OpenCV · Frame" view and the comparison.
+struct BaselineTrack {
+    std::vector<cv::Rect2d> boxes;
+    std::vector<double> iou;
+    int lost = 0;
+    double ms = 0;  // OpenCV's own time, all frames
+};
+
+// "OpenCV · Frame": the frame (shared picture) with the baseline's box, its path so far, the truth,
+// and an optional oriented box (CamShift).
+View baselineView(const QImage& frame, const BaselineTrack& b, bool lost, const cv::Rect2d& truth,
+                  const cv::RotatedRect& fitted = {});
+
+// Rows of Output::comparison shared by the trackers: mean IoU (when the truth is known), lost frames,
+// and time per frame (oursMs: our time for the same work, all frames).
+void compareRows(Output& out, const Summary& ours, double oursMs, const BaselineTrack& theirs, const QString& timeLabel);
+
 }  // namespace vl::app::tracking

@@ -1,3 +1,6 @@
+// Constant-velocity Kalman filter (see kalman.hpp for the model). Course: "3D Vision and Motion",
+// part 10.
+
 #include "core/motion/kalman.hpp"
 
 #include <algorithm>
@@ -7,62 +10,63 @@
 namespace vl::motion {
 
 ConstantVelocityKalman::ConstantVelocityKalman(const KalmanParams& p) : p_(p) {
-    F_ = cv::Matx44d::eye();
-    F_(0, 2) = F_(1, 3) = 1.0;
-    // White acceleration a ~ N(0, q²) over one frame: position moves by a/2, velocity by a.
-    const double q2 = p_.processNoise * p_.processNoise;
-    Q_ = cv::Matx44d::zeros();
-    Q_(0, 0) = Q_(1, 1) = 0.25 * q2;
-    Q_(0, 2) = Q_(2, 0) = Q_(1, 3) = Q_(3, 1) = 0.5 * q2;
-    Q_(2, 2) = Q_(3, 3) = q2;
+    // A: position += velocity · δt, velocity unchanged.
+    A_ = cv::Matx44d(1, 0, 1, 0,
+                     0, 1, 0, 1,
+                     0, 0, 1, 0,
+                     0, 0, 0, 1);
+    // H: we observe the position only.
+    H_ = cv::Matx<double, 2, 4>(1, 0, 0, 0,
+                                0, 1, 0, 0);
+    // Q = G G ᵀ σ_a² with G = (½, ½, 1, 1)ᵀ per axis: an acceleration a during one frame moves the
+    // position by a/2 and the velocity by a, so their noises are correlated.
+    const double q = p_.processNoise * p_.processNoise;
+    Q_ = cv::Matx44d(q / 4, 0,     q / 2, 0,
+                     0,     q / 4, 0,     q / 2,
+                     q / 2, 0,     q,     0,
+                     0,     q / 2, 0,     q);
     init({0, 0});
 }
 
+cv::Matx22d ConstantVelocityKalman::R() const {
+    const double r = p_.measurementNoise * p_.measurementNoise;
+    return {r, 0, 0, r};
+}
+
 void ConstantVelocityKalman::init(cv::Point2d position) {
-    s_ = {position.x, position.y, 0.0, 0.0};
-    const double r2 = p_.measurementNoise * p_.measurementNoise, v2 = p_.initialSpeedStd * p_.initialSpeedStd;
-    P_ = cv::Matx44d::diag({r2, r2, v2, v2});
+    theta_ = {position.x, position.y, 0.0, 0.0};
+    const double r = p_.measurementNoise * p_.measurementNoise, v = p_.initialSpeedStd * p_.initialSpeedStd;
+    P_ = cv::Matx44d::diag({r, r, v, v});
 }
 
+// Step 1:  Θ⁻ = A Θ,   P⁻ = A P Aᵀ + Q
 void ConstantVelocityKalman::predict() {
-    s_ = F_ * s_;
-    P_ = F_ * P_ * F_.t() + Q_;
+    theta_ = A_ * theta_;
+    P_ = A_ * P_ * A_.t() + Q_;
 }
 
-void ConstantVelocityKalman::update(cv::Point2d z, double noiseScale) {
-    const double r2 = p_.measurementNoise * p_.measurementNoise * std::max(noiseScale, 1e-6);
-    // H = [I 0], so H P Hᵀ is the top-left block and P Hᵀ the first two columns of P.
-    const cv::Matx22d S(P_(0, 0) + r2, P_(0, 1), P_(1, 0), P_(1, 1) + r2);
-    const cv::Matx22d Si = S.inv();
-    cv::Matx<double, 4, 2> PHt;
-    for (int i = 0; i < 4; ++i) {
-        PHt(i, 0) = P_(i, 0);
-        PHt(i, 1) = P_(i, 1);
-    }
-    const cv::Matx<double, 4, 2> K = PHt * Si;
-    const cv::Vec2d innovation(z.x - s_[0], z.y - s_[1]);
-    s_ += K * innovation;
-    cv::Matx44d IKH = cv::Matx44d::eye();
-    for (int i = 0; i < 4; ++i) {
-        IKH(i, 0) -= K(i, 0);
-        IKH(i, 1) -= K(i, 1);
-    }
-    P_ = IKH * P_ * IKH.t() + r2 * (K * K.t());
+// Step 2:  K = P⁻ Hᵀ (H P⁻ Hᵀ + R)⁻¹,   Θ = Θ⁻ + K (X − H Θ⁻),   P = (I − K H) P⁻
+void ConstantVelocityKalman::update(cv::Point2d X, double noiseScale) {
+    const cv::Matx22d R = this->R() * std::max(noiseScale, 1e-6);
+    const cv::Matx22d S = H_ * P_ * H_.t() + R;  // covariance of the innovation
+    const cv::Matx<double, 4, 2> K = P_ * H_.t() * S.inv();
+    const cv::Vec2d innovation = cv::Vec2d(X.x, X.y) - H_ * theta_;
+    theta_ = theta_ + K * innovation;
+    P_ = (cv::Matx44d::eye() - K * H_) * P_;
 }
 
-cv::Matx22d ConstantVelocityKalman::positionCovariance() const {
-    return {P_(0, 0), P_(0, 1), P_(1, 0), P_(1, 1)};
-}
+cv::Matx22d ConstantVelocityKalman::positionCovariance() const { return H_ * P_ * H_.t(); }
 
 CovEllipse covarianceEllipse(const cv::Matx22d& c, cv::Point2d centre, double nSigma) {
-    // Eigenvalues of a symmetric 2×2 matrix in closed form.
+    // Eigenvalues of the symmetric 2×2 matrix [a b; b d] in closed form: mean ± √(((a − d)/2)² + b²).
     const double a = c(0, 0), b = 0.5 * (c(0, 1) + c(1, 0)), d = c(1, 1);
-    const double mean = 0.5 * (a + d), rad = std::sqrt(0.25 * (a - d) * (a - d) + b * b);
-    const double l1 = mean + rad, l2 = std::max(0.0, mean - rad);
+    const double mean = 0.5 * (a + d), radius = std::sqrt(0.25 * (a - d) * (a - d) + b * b);
+    const double l1 = mean + radius, l2 = std::max(0.0, mean - radius);
     CovEllipse e;
     e.centre = centre;
     e.major = nSigma * std::sqrt(l1);
     e.minor = nSigma * std::sqrt(l2);
+    // Direction of the major eigenvector: tan 2φ = 2b / (a − d).
     e.angleDeg = 0.5 * std::atan2(2 * b, a - d) * 180.0 / std::numbers::pi;
     return e;
 }

@@ -1,23 +1,30 @@
 #pragma once
-// RANSAC (Fischler & Bolles 1981): robust fitting when part of the data is plain wrong.
+// RANSAC, random sample consensus (Fischler & Bolles 1981). Course "3D Vision and Motion", part 4.
 //
-//   repeat N times:  draw a minimal sample (s points) -> fit a model -> count the points it explains
-//   keep the model with the largest consensus, then refit it by least squares on its inliers.
+// Robust fitting when part of the data is plain wrong (bad matches). The steps:
+//   1. drawSample      s distinct correspondences at random (s = 4 for H, 8 for F)
+//   2. fitMinimal      the model(s) through them (problem-specific)
+//   3. countInliers    correspondences whose residual is below the threshold: the consensus
+//   4. adaptiveTrials  keep the best model; from its inlier ratio w, update the number of trials
+//                        N = log(1 − p) / log(1 − w^s)
+//                      (N trials all contain an outlier with probability (1 − w^s)^N; ask it to be ≤ 1 − p)
+//   5. refit           least squares on all inliers of the best model, recount, repeat while it grows
 //
-// N is adaptive: if a fraction w of the data are inliers, a sample is clean with probability w^s, and
-// N samples all fail with probability (1 - w^s)^N. Asking that to be below 1 - p gives
+// The loop is the same for homographies and fundamental matrices: it is written once, as a template on
+// a Problem type that provides
+//     using Model = ...;
+//     int size() const;                                     n correspondences
+//     int sampleSize() const;                               s
+//     std::vector<Model> fitMinimal(const std::vector<int>& sample) const;   0, 1 or more models
+//     void residuals(const Model&, std::vector<double>& r) const;            r[i] in pixels
+//     std::optional<Model> fitAll(const std::vector<int>& indices) const;    least squares
 //
-//   N = log(1 - p) / log(1 - w^s),
-//
-// recomputed each time a better model raises the lower bound on w. The loop is generic: the caller
-// supplies the minimal solver, the residuals and the refit, so the same code fits homographies and
-// fundamental matrices. Cost: O(N · (fit + n)).
+// Cost O(N · (fit + n)).
 
+#include <algorithm>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <random>
-#include <span>
 #include <stop_token>
 #include <vector>
 
@@ -26,116 +33,93 @@
 namespace vl::geometry {
 
 struct RansacParams {
-    double threshold = 3.0;     // a point is an inlier when its residual is below this (pixels)
-    double confidence = 0.99;   // p: wanted probability of drawing at least one clean sample
-    int maxTrials = 5000;       // hard cap on N
-    std::uint32_t seed = 7;     // fixed, so a run is reproducible
-    int refitRounds = 3;        // least-squares refit -> recount, while the consensus grows
+    double threshold = 3.0;    // a correspondence is an inlier when its residual is below this (pixels)
+    double confidence = 0.99;  // p: wanted probability of drawing at least one clean sample
+    int maxTrials = 5000;      // hard cap on N
+    std::uint32_t seed = 7;    // fixed, so a run is reproducible
+    int refitRounds = 3;       // step 5 at most this many times
 };
 
 struct RansacReport {
-    int trials = 0;                       // samples actually drawn
-    int requiredTrials = 0;               // N from the final inlier ratio
-    std::vector<int> bestInliersPerTrial; // consensus of the best model so far, after each trial (sparkline)
+    int trials = 0;                        // samples actually drawn
+    int requiredTrials = 0;                // N from the final inlier ratio
+    std::vector<int> bestInliersPerTrial;  // consensus of the best model so far, after each trial
     int inliersBeforeRefit = 0;
 };
 
 template <class Model>
 struct RansacResult {
     std::optional<Model> model;
-    std::vector<std::uint8_t> inliers;  // 1 per input correspondence
+    std::vector<std::uint8_t> inliers;  // 1 per correspondence
     int nInliers = 0;
     RansacReport report;
 };
 
-// N = log(1 - p) / log(1 - w^s), clamped to [1, cap]. w = 0 gives the cap.
+// Step 4: N = log(1 − p) / log(1 − w^s), clamped to [1, cap]. w = 0 gives the cap.
 int adaptiveTrials(double inlierRatio, int sampleSize, double confidence, int cap);
 
-template <class Model>
-struct RansacProblem {
-    int size = 0;        // n correspondences
-    int sampleSize = 4;  // s, minimal number of correspondences to fit a model
-    // Minimal solver on s indices; may return 0 (degenerate sample) or several models (e.g. 7-point).
-    std::function<std::vector<Model>(std::span<const int>)> fit;
-    // Residual of every correspondence for a model, in pixels (out has size n).
-    std::function<void(const Model&, std::vector<double>&)> residuals;
-    // Least-squares fit on all given indices; nullopt when it fails.
-    std::function<std::optional<Model>(std::span<const int>)> refit;
-};
+// Step 1: s distinct indices in [0, n), by rejection (cheap because s ≪ n).
+std::vector<int> drawSample(std::mt19937& rng, int n, int s);
 
-template <class Model>
-RansacResult<Model> ransac(const RansacProblem<Model>& pb, const RansacParams& p, std::stop_token stop = {}) {
-    RansacResult<Model> res;
-    const int n = pb.size, s = pb.sampleSize;
-    res.inliers.assign(static_cast<size_t>(std::max(n, 0)), 0);
-    if (n < s || s <= 0) return res;
+// Step 3: inlier[i] = residual[i] < threshold (a NaN residual is an outlier). Returns the count.
+int countInliers(const std::vector<double>& residuals, double threshold, std::vector<std::uint8_t>& inlier);
+
+// Indices i with mask[i] set.
+std::vector<int> indicesOf(const std::vector<std::uint8_t>& mask);
+
+template <class Problem>
+RansacResult<typename Problem::Model> ransac(const Problem& problem, const RansacParams& p, std::stop_token stop = {}) {
+    using Model = typename Problem::Model;
+    const int n = problem.size(), s = problem.sampleSize();
+    RansacResult<Model> result;
+    result.inliers.assign(size_t(std::max(n, 0)), 0);
+    if (n < s) return result;
 
     std::mt19937 rng(p.seed);
-    std::uniform_int_distribution<int> pick(0, n - 1);
-    std::vector<int> sample(static_cast<size_t>(s));
-    std::vector<double> r(static_cast<size_t>(n));
-
-    auto count = [&](const Model& m, std::vector<std::uint8_t>* mask) {
-        pb.residuals(m, r);
-        int c = 0;
-        for (int i = 0; i < n; ++i) {
-            const bool in = r[size_t(i)] < p.threshold;  // NaN residuals are outliers
-            c += in;
-            if (mask) (*mask)[size_t(i)] = in;
-        }
-        return c;
-    };
-
-    int best = 0, needed = p.maxTrials;
-    std::optional<Model> bestModel;
-    for (int trial = 0; trial < needed && trial < p.maxTrials; ++trial) {
-        if ((trial & 31) == 0) checkStop(stop);
-        // s distinct indices by rejection: cheap because s << n.
-        for (int k = 0; k < s;) {
-            const int i = pick(rng);
-            bool dup = false;
-            for (int j = 0; j < k; ++j) dup |= sample[size_t(j)] == i;
-            if (!dup) sample[size_t(k++)] = i;
-        }
-        for (const Model& m : pb.fit(sample)) {
-            const int c = count(m, nullptr);
-            if (c > best) {
-                best = c;
-                bestModel = m;
-                needed = adaptiveTrials(double(best) / n, s, p.confidence, p.maxTrials);
+    std::vector<double> r;
+    std::vector<std::uint8_t> mask(static_cast<size_t>(n));
+    std::optional<Model> best;
+    int bestCount = 0, needed = p.maxTrials;
+    for (int trial = 0; trial < needed; ++trial) {
+        if (trial % 32 == 0) checkStop(stop);
+        // 1–2. A random minimal sample and the model(s) through it.
+        for (const Model& model : problem.fitMinimal(drawSample(rng, n, s))) {
+            // 3. Its consensus.
+            problem.residuals(model, r);
+            const int count = countInliers(r, p.threshold, mask);
+            // 4. A better model raises the known inlier ratio, so fewer trials are needed.
+            if (count > bestCount) {
+                bestCount = count;
+                best = model;
+                needed = adaptiveTrials(double(count) / n, s, p.confidence, p.maxTrials);
             }
         }
-        res.report.bestInliersPerTrial.push_back(best);
-        res.report.trials = trial + 1;
+        result.report.bestInliersPerTrial.push_back(bestCount);
+        result.report.trials = trial + 1;
     }
-    res.report.requiredTrials = needed;
-    res.report.inliersBeforeRefit = best;
-    if (!bestModel) return res;
+    result.report.requiredTrials = needed;
+    result.report.inliersBeforeRefit = bestCount;
+    if (!best) return result;
 
-    // Least-squares polish: the minimal model only saw s points; all inliers pin it down better.
-    // Refit, recount, and repeat while the consensus does not shrink.
-    std::vector<std::uint8_t> mask(static_cast<size_t>(n));
-    best = count(*bestModel, &mask);
-    for (int round = 0; round < p.refitRounds && pb.refit; ++round) {
-        std::vector<int> idx;
-        idx.reserve(static_cast<size_t>(best));
-        for (int i = 0; i < n; ++i)
-            if (mask[size_t(i)]) idx.push_back(i);
-        const auto refined = pb.refit(idx);
+    // 5. The minimal model saw only s points; all its inliers pin it down better. Refit, recount and
+    //    repeat while the consensus grows (stop if it would shrink).
+    problem.residuals(*best, r);
+    bestCount = countInliers(r, p.threshold, result.inliers);
+    for (int round = 0; round < p.refitRounds; ++round) {
+        const std::optional<Model> refined = problem.fitAll(indicesOf(result.inliers));
         if (!refined) break;
-        std::vector<std::uint8_t> m2(static_cast<size_t>(n));
-        const int c = count(*refined, &m2);
-        if (c < best) break;
-        const bool grew = c > best;
-        bestModel = refined;
-        best = c;
-        mask.swap(m2);
+        problem.residuals(*refined, r);
+        const int count = countInliers(r, p.threshold, mask);
+        if (count < bestCount) break;
+        const bool grew = count > bestCount;
+        best = refined;
+        bestCount = count;
+        result.inliers = mask;
         if (!grew) break;
     }
-    res.model = bestModel;
-    res.inliers = std::move(mask);
-    res.nInliers = best;
-    return res;
+    result.model = best;
+    result.nInliers = bestCount;
+    return result;
 }
 
 }  // namespace vl::geometry

@@ -1,16 +1,18 @@
 #pragma once
-// Panorama by homographies: every image is mapped into the frame of a reference image (the middle
-// one, so distortion is shared on both sides) and blended on a common canvas.
+// Panorama by homographies. Course "3D Vision and Motion", part 2.
 //
-// Chaining: with H_i : image i -> image i+1 estimated between neighbours, the map of image i to the
-// reference r is the product of the links in between (inverted on the right of r).
+// Every image is mapped into the frame of a reference image (the middle one, so the distortion is
+// shared on both sides) and blended on a common canvas. Steps (stitch.cpp):
+//   1. chainToReference  with H_i : image i -> image i+1 between neighbours, the map of image i to the
+//                        reference r is the product of the links in between (inverted right of r)
+//   2. warpedBounds      the canvas: bounding box of every image's warped outline
+//   3. warpInto          inverse mapping: for each canvas pixel p, x = (T H_i)⁻¹ p says where to read
+//                        image i (bilinear), so the canvas has no holes
+//   4. featherWeight     each image weighs its pixels by their distance to its own border, and
+//   5. blend             the canvas is the weighted mean: seams between images of different exposure
+//                        fade out over the overlap
 //
-// Inverse mapping: for each canvas pixel, (H_i)⁻¹ gives where to read in image i (bilinear), so the
-// canvas has no holes. Along a canvas row the homogeneous source point is affine in x, so it costs
-// three additions per pixel and one division.
-//
-// Feathering: each image weighs its pixels by their distance to its own border, and the canvas is
-// the weighted mean: seams between images of different exposure fade out over the overlap.
+// Cost O(canvas pixels · images).
 
 #include <stop_token>
 #include <vector>

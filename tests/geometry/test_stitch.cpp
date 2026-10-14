@@ -2,7 +2,8 @@
 
 #include <gtest/gtest.h>
 
-#include "core/geometry/features.hpp"
+#include "core/geometry/matching.hpp"
+#include "core/geometry/sift.hpp"
 #include "core/geometry/homography.hpp"
 #include "core/geometry/scenes.hpp"
 #include "core/geometry/stitch.hpp"
@@ -74,7 +75,7 @@ TEST(Stitch, SyntheticRotatingCameraEndToEnd) {
     const auto views = scenes::rotatingCamera({480, 360}, 3, 24.0, 4);
     std::vector<cv::Matx33d> links;
     for (int i = 0; i + 1 < 3; ++i) {
-        const auto fa = detectSift(views.images[size_t(i)], 2000), fb = detectSift(views.images[size_t(i + 1)], 2000);
+        const auto fa = detectSift(views.images[size_t(i)]), fb = detectSift(views.images[size_t(i + 1)]);
         const auto m = matchDescriptors(fa.descriptors, fb.descriptors, {0.75f, true});
         ASSERT_GT(m.size(), 60u);
         Points a, b;

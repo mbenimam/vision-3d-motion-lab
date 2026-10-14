@@ -92,6 +92,26 @@ TEST(Hough, FindsAnExactTranslation) {
     EXPECT_EQ(cv::countNonZero(local(cv::Rect(0, 0, 20, 20))), 0);
 }
 
+TEST(Hough, OrientationOfARampAndItsBin) {
+    // f(x, y) = 8 (x cos θ + y sin θ): the gradient is 8 (cos θ, sin θ) inside, whatever the smoothing
+    // (up to the rounding to 8 bits), so the orientation must be θ on the whole circle, and the bin
+    // ⌊(θ + π) · bins / 2π⌋ of the measured θ.
+    GradientParams gp;
+    gp.bins = 36;
+    for (double theta = -3.1; theta < 3.14; theta += 0.37) {
+        cv::Mat f(41, 41, CV_8U);
+        for (int y = 0; y < f.rows; ++y)
+            for (int x = 0; x < f.cols; ++x)
+                f.at<uchar>(y, x) = cv::saturate_cast<uchar>(128 + 8.0 * ((x - 20) * std::cos(theta) + (y - 20) * std::sin(theta)));
+        const Orientations o = orientations(f, gp);
+        const double measured = o.angle.at<float>(20, 20);
+        EXPECT_NEAR(o.magnitude.at<float>(20, 20), 8.0, 0.25) << theta;
+        EXPECT_NEAR(measured, theta, 0.03) << theta;
+        EXPECT_EQ(o.bin.at<ushort>(20, 20), int((measured + CV_PI) * gp.bins / (2 * CV_PI))) << theta;
+        EXPECT_EQ(o.mask.at<uchar>(20, 20), 255) << theta;
+    }
+}
+
 TEST(Hough, TracksTheSyntheticObject) {
     const auto s = vl::motion::test::noisyMovingObject({320, 240}, 120, 11);
     HoughTrackerParams p;

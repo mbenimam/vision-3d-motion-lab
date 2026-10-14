@@ -1,7 +1,9 @@
 // Topic: tracking by mean shift on the back-projection of a hue histogram, optionally with a
-// constant-velocity Kalman prediction.
+// constant-velocity Kalman prediction. Baseline: cv::meanShift or cv::CamShift climbing the same
+// back-projection from the same start box.
 
 #include <cmath>
+#include <optional>
 
 #include <opencv2/imgproc.hpp>
 
@@ -10,6 +12,7 @@
 #include "app/modules/motion/tracking_common.hpp"
 #include "core/common/image.hpp"
 #include "core/motion/mean_shift.hpp"
+#include "core/motion/opencv_baselines.hpp"
 
 namespace vl::app {
 namespace {
@@ -37,7 +40,10 @@ public:
                                "where to start, and carry the box through an occlusion."),
                 QStringLiteral("on <i>Synthetic: disc behind a pillar</i>, watch the box stick to the pillar; then "
                                "turn on <b>Kalman prediction</b> and see it come out on the other side with the disc."),
-                InputKind::Video, 600, QStringLiteral("Frame")};
+                InputKind::Video, 600, QStringLiteral("Frame"), QStringLiteral("cv::meanShift / cv::CamShift"),
+                {QStringLiteral("src/core/motion/mean_shift.hpp"), QStringLiteral("src/core/motion/mean_shift.cpp"),
+                 QStringLiteral("src/core/motion/kalman.hpp"), QStringLiteral("src/core/motion/kalman.cpp"),
+                 QStringLiteral("src/core/motion/tracking.hpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -55,6 +61,10 @@ public:
                 .withHelp(QStringLiteral("Start each search from a constant-velocity prediction, and coast on it when the "
                                          "window holds less than 30 % of the model's weight. The dashed ellipse is "
                                          "the 2σ uncertainty of the prediction.")),
+            ParamSpec::choice(QStringLiteral("baseline"), QStringLiteral("OpenCV baseline (Compare)"),
+                              {QStringLiteral("cv::meanShift"), QStringLiteral("cv::CamShift")}, 0)
+                .withHelp(QStringLiteral("What Compare runs on our back-projection from the same box: OpenCV's mean "
+                                         "shift (fixed window), or CamShift (the window also adapts its size and angle).")),
         };
     }
 
@@ -77,6 +87,13 @@ public:
         sum.hasTruth = motion_samples::truthBox(in, 0).area() > 0;
         std::vector<TrackStep> steps;
         Stopwatch sw;
+        // The baseline climbs the same weights, from the same box, without any prediction.
+        std::optional<opencv::ShiftTracker> baseline;
+        const auto which = static_cast<opencv::Shift>(intParam(p, "baseline"));
+        if (ctx.compare) baseline.emplace(which, box0, tp.maxIterations, tp.epsilon);
+        tracking::BaselineTrack theirs;
+        double oursClimbMs = 0;
+        std::vector<double> cvIterations;
         for (size_t t = 0; t < in.images.size(); ++t) {
             ctx.check();
             const cv::Mat frame = vl::toBGR(in.images[t]);
@@ -86,6 +103,7 @@ public:
             sum.score.push_back(100 * s.score);
             sum.iterations.push_back(s.iterations);
             sum.lost += s.lost;
+            oursClimbMs += r.climbMs;
 
             Frame f;
             const cv::Rect2d truth = motion_samples::truthBox(in, t);
@@ -114,6 +132,19 @@ public:
                 sum.iou.push_back(o);
                 f.stats.push_back({QStringLiteral("This frame: IoU"), fmt(o, 2)});
             }
+            if (baseline) {
+                opencv::ShiftTracker::Step b{box0, {}, 0, 0};
+                if (t > 0) b = baseline->step(r.weights);
+                theirs.boxes.push_back(b.box);
+                theirs.ms += b.ms;
+                if (t > 0 && b.iterations >= 0) cvIterations.push_back(b.iterations);
+                // Same rule as ours: lost when the window holds too little of the first box's weight.
+                const double share = tracker.referenceMass() > 0 ? windowMass(r.weights, cv::Rect(b.box)) / tracker.referenceMass() : 0.0;
+                const bool lost = t > 0 && share < tp.lostRatio;
+                theirs.lost += lost;
+                if (truth.area() > 0) theirs.iou.push_back(iou(b.box, truth));
+                f.views.push_back(tracking::baselineView(v0.image, theirs, lost, truth, b.fitted));
+            }
             f.stats.push_back({QStringLiteral("This frame: model weight"), fmt(100 * s.score, 0) + QStringLiteral(" %")});
             f.stats.push_back({QStringLiteral("This frame: iterations"), QString::number(s.iterations)});
             if (s.lost) f.stats.push_back({QStringLiteral("Status"), QStringLiteral("lost")});
@@ -127,6 +158,17 @@ public:
             }
         }
         tracking::summarise(out, sum, QStringLiteral("model weight kept"), sw.ms(), true);
+        if (baseline) {
+            tracking::compareRows(out, sum, oursClimbMs, theirs, QStringLiteral("Mean-shift time per frame"));
+            if (!cvIterations.empty()) {
+                // Frame 0 is the given box for both: count the frames after it.
+                double a = 0, b = 0;
+                for (size_t t = 1; t < sum.iterations.size(); ++t) a += sum.iterations[t];
+                for (double v : cvIterations) b += v;
+                out.comparison.push_back({QStringLiteral("Iterations per frame"), a / double(cvIterations.size()),
+                                          b / double(cvIterations.size()), {}, 1, true});
+            }
+        }
         if (note.isEmpty() && sum.lost > int(in.images.size()) / 5)
             note = tp.usePrediction ? QStringLiteral("Lost in more than a fifth of the frames: try fewer bins or a lower saturation threshold.")
                                     : QStringLiteral("Lost in more than a fifth of the frames: try the Kalman prediction.");

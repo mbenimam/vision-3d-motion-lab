@@ -1,14 +1,16 @@
-// Topic: epipolar geometry. The fundamental matrix by the normalised 8-point algorithm inside RANSAC,
-// its epipolar lines and epipoles, and click-to-see-the-line between the two views.
+// Topic: epipolar geometry. The fundamental matrix by the normalised 8-point algorithm inside RANSAC on
+// our SIFT matches, its epipolar lines and epipoles, click-to-see-the-line between the two views, and
+// cv::findFundamentalMat on the same matches as the baseline.
 
 #include <cmath>
 
 #include "app/module.hpp"
 #include "app/modules/geometry/geometry_common.hpp"
 #include "app/modules/geometry/geometry_samples.hpp"
-#include "core/geometry/features.hpp"
 #include "core/geometry/fundamental.hpp"
 #include "core/geometry/homography.hpp"
+#include "core/geometry/opencv_baselines.hpp"
+#include "core/geometry/sift.hpp"
 
 namespace vl::app {
 namespace {
@@ -42,7 +44,12 @@ public:
                 QStringLiteral("click a point of the left image of <i>Merton 001 / 002</i> and follow its line on the "
                                "right; then, on the synthetic room, switch off <i>Enforce rank 2</i>: σ₃ leaves 0, the "
                                "epipole is gone and the error against the true F doubles."),
-                InputKind::ImagePair, 120, QStringLiteral("Left")};
+                InputKind::ImagePair, 120, QStringLiteral("Left"), QStringLiteral("cv::findFundamentalMat (FM_RANSAC)"),
+                {QStringLiteral("src/core/geometry/fundamental.hpp"), QStringLiteral("src/core/geometry/fundamental.cpp"),
+                 QStringLiteral("src/core/geometry/ransac.hpp"), QStringLiteral("src/core/geometry/ransac.cpp"),
+                 QStringLiteral("src/core/geometry/homography.hpp"), QStringLiteral("src/core/geometry/homography.cpp"),
+                 QStringLiteral("src/core/geometry/sift.hpp"), QStringLiteral("src/core/geometry/sift.cpp"),
+                 QStringLiteral("src/core/geometry/matching.hpp"), QStringLiteral("src/core/geometry/matching.cpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -65,6 +72,9 @@ public:
             ParamSpec::toggle(QStringLiteral("rank2"), QStringLiteral("Enforce rank 2"), true)
                 .withHelp(QStringLiteral("Zero the smallest singular value of F. Off, F is full rank: there is no "
                                          "epipole, and the lines no longer meet exactly in one point.")),
+            ParamSpec::toggle(QStringLiteral("upsample"), QStringLiteral("SIFT on the image doubled"), true)
+                .withHelp(QStringLiteral("Lowe's first step: double the image before the scale space. Off: fewer "
+                                         "keypoints (the small ones are lost), four times faster.")),
         };
     }
 
@@ -75,14 +85,20 @@ public:
         const cv::Mat& L = in.images[0];
         const cv::Mat& R = in.images[1];
         report(ctx.progress, 0.1, "matching");
-        const auto c = correspond(cache_, L, R, {float(realParam(p, "ratio")), true}, 3000, ctx.stop);
+        g::SiftParams sp;
+        sp.upsample = toggleParam(p, "upsample");
+        std::vector<double> detectMs;
+        const auto features = detectAll(cache_, {L, R}, sp, ctx.stop, detectMs);
+        const auto c = correspond(features[0], features[1], {float(realParam(p, "ratio")), true}, ctx.stop);
 
         g::RansacParams rp;
         rp.threshold = realParam(p, "threshold");
         rp.confidence = kConfidence[std::clamp(intParam(p, "confidence"), 0, 2)];
         const g::EightPointOptions opt{toggleParam(p, "normalise"), toggleParam(p, "rank2")};
         report(ctx.progress, 0.6, "RANSAC");
+        const Stopwatch ransacTime;
         const auto e = g::estimateFundamental(c.a, c.b, rp, opt, ctx.stop);
+        const double oursMs = ransacTime.ms();
         ctx.check();
 
         Output out;
@@ -129,10 +145,10 @@ public:
         // Against the truth: estimated lines (solid) vs true lines (dashed) for true correspondences.
         const bool hasTruth = in.truth.size() >= 2 && !in.truth[0].empty();
         double truthErr = 0;
+        g::Points t1, t2;
         if (hasTruth) {
             const cv::Matx33d Ft(in.truth[0]);
             const cv::Mat& corr = in.truth[1];
-            g::Points t1, t2;
             for (int i = 0; i < corr.rows; ++i)
                 t1.emplace_back(corr.at<double>(i, 0), corr.at<double>(i, 1)), t2.emplace_back(corr.at<double>(i, 2), corr.at<double>(i, 3));
             truthErr = g::meanSymmetricEpipolarDistance(e.F, t1, t2);
@@ -162,6 +178,8 @@ public:
         const double planarShare = double(both) / std::max(1, e.nInliers);
 
         const double sigmaRatio = e.singularValues[2] / std::max(e.singularValues[1], 1e-300);
+        out.stats.push_back({QStringLiteral("Keypoints"), QStringLiteral("%1 · %2").arg(features[0].keypoints.size())
+                                                              .arg(features[1].keypoints.size())});
         out.stats.push_back({QStringLiteral("Inliers / matches"),
                              QStringLiteral("%1 / %2").arg(e.nInliers).arg(c.a.size()),
                              !hasTruth});
@@ -186,8 +204,46 @@ public:
             out.note = QStringLiteral("Rank 2 not enforced: F has no exact null vector, so its epipolar lines only nearly meet.");
         else if (!opt.normalise)
             out.note = QStringLiteral("Normalisation off: the 8-point system mixes terms of order 1 and 10⁶.");
+        if (ctx.compare) compareWithOpenCv(L, c, e, rp, oursMs, hasTruth ? &t1 : nullptr, &t2, truthErr, f, out);
         out.frames.push_back(std::move(f));
         return out;
+    }
+
+    // cv::findFundamentalMat (FM_RANSAC) on *our* matches, same threshold and confidence: the two
+    // estimators answer the same question on identical data. Its epipolar lines on the left image.
+    static void compareWithOpenCv(const cv::Mat& L, const Correspondences& c, const g::FundamentalEstimate& ours,
+                                  const g::RansacParams& rp, double oursMs, const g::Points* t1, const g::Points* t2,
+                                  double oursTruthErr, Frame& f, Output& out) {
+        const auto cvF = g::opencv::findFundamental(c.a, c.b, rp.threshold, rp.confidence);
+        View left{QStringLiteral("OpenCV · Left"), toQImage(L)};
+        double sampson = 0;
+        if (cvF.ok) {
+            const auto pick = spreadSubset(c.a, cvF.inliers, kLines);
+            for (int k = 0; k < int(pick.size()); ++k) {
+                const size_t i = size_t(pick[size_t(k)]);
+                const QColor col = pairColor(k);
+                if (auto s = lineShape(g::lineInImage1(cvF.F, c.b[i]), L.size(), {0, 0}, {col, 1.4})) left.shapes.push_back(*s);
+                left.shapes.push_back(PointsShape{QPolygonF{qp(c.a[i])}, col, 4.0});
+            }
+            markEpipole(left, g::finitePoint(g::epipoles(cvF.F).e1), L.size(), QStringLiteral("epipole e₁"));
+            for (size_t i = 0; i < c.a.size(); ++i)
+                if (cvF.inliers[i]) sampson += g::sampsonDistance(cvF.F, c.a[i], c.b[i]);
+            sampson /= std::max(1, cvF.nInliers);
+        } else {
+            left.shapes.push_back(LabelShape{QPointF(12, 12), QStringLiteral("OpenCV found no F"), colors::bad});
+        }
+        left.shapes.push_back(LabelShape{QPointF(12, double(L.rows) - 28),
+                                         QStringLiteral("cv::findFundamentalMat on our matches: %1 inliers").arg(cvF.nInliers),
+                                         colors::info});
+        f.views.push_back(left);
+
+        auto& cmp = out.comparison;
+        if (t1 && cvF.ok)
+            cmp.push_back({QStringLiteral("Error vs true F"), oursTruthErr, g::meanSymmetricEpipolarDistance(cvF.F, *t1, *t2),
+                           QStringLiteral(" px"), 2});
+        cmp.push_back({QStringLiteral("Inliers (same matches)"), double(ours.nInliers), double(cvF.nInliers), {}, 0, false});
+        cmp.push_back({QStringLiteral("Mean Sampson error on inliers"), ours.meanSampson, sampson, QStringLiteral(" px"), 2});
+        cmp.push_back({QStringLiteral("Run time (RANSAC)"), oursMs, cvF.ms, QStringLiteral(" ms"), 1});
     }
 
     // Click a point in one image: its epipolar line in the other (and on the side-by-side view).
@@ -208,6 +264,7 @@ public:
             fromLeft = q.x < sl.width;
             if (!fromLeft) q.x -= offR;
         } else if (view != kLeftView && view != kRightView) {
+            if (views[size_t(view)].name != QStringLiteral("Truth")) return {};  // the OpenCV view has its own F
             fromLeft = false;  // the truth view shows the right image
         }
         const cv::Size from = fromLeft ? sl : sr, to = fromLeft ? sr : sl;
@@ -228,7 +285,7 @@ public:
         m.shapes.push_back(PointsShape{QPolygonF{qp(q + srcOff)}, colors::accent, 5.0});
         if (auto l = lineShape(line, to, dstOff, pen)) m.shapes.push_back(*l);
         s.push_back(m);
-        if (views.size() > 3 && fromLeft) {  // truth view: the right image again
+        if (views.size() > 3 && views[3].name == QStringLiteral("Truth") && fromLeft) {  // the right image again
             ClickShapes tv{3, {}};
             if (auto l = lineShape(line, to, {0, 0}, pen)) tv.shapes.push_back(*l);
             s.push_back(tv);
@@ -237,7 +294,7 @@ public:
     }
 
 private:
-    mutable vl::geometry::FeatureCache cache_;
+    mutable FeatureCache cache_;
 };
 
 }  // namespace

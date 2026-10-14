@@ -1,40 +1,49 @@
+// The fundamental matrix by the normalised 8-point algorithm inside RANSAC. Course "3D Vision and
+// Motion", parts 4 and 5. The steps are listed in fundamental.hpp.
+
 #include "core/geometry/fundamental.hpp"
 
 #include <cmath>
 #include <limits>
-#include <span>
 
 namespace vl::geometry {
 
+namespace {
+
+// Step 3: F = U diag(σ1, σ2, σ3) Vᵀ  ->  U diag(σ1, σ2, 0) Vᵀ.
+cv::Matx33d nearestRankTwo(const cv::Matx33d& F) {
+    cv::Matx31d sigma;
+    cv::Matx33d U, Vt;
+    cv::SVD::compute(F, sigma, U, Vt);
+    return U * cv::Matx33d::diag({sigma(0), sigma(1), 0.0}) * Vt;
+}
+
+}  // namespace
+
 std::optional<cv::Matx33d> eightPoint(const Points& x1, const Points& x2, EightPointOptions opt) {
-    const int n = static_cast<int>(x1.size());
+    const int n = int(x1.size());
     if (n < 8 || x2.size() != x1.size()) return std::nullopt;
+    // 1. Normalisation of each image's points.
     const cv::Matx33d T1 = opt.normalise ? hartleyNormalisation(x1) : cv::Matx33d::eye();
     const cv::Matx33d T2 = opt.normalise ? hartleyNormalisation(x2) : cv::Matx33d::eye();
 
-    // One row per pair: x2ᵀ F x1 = 0 expanded over f = (F11 F12 F13 F21 ... F33). A 9th zero row for
-    // exactly 8 points makes the system square (null vector = last row of Vᵀ).
+    // 2. x2ᵀ F x1 = 0 with x1 = (x, y, 1), x2 = (x', y', 1), expanded over f = (F11 F12 F13 F21 ... F33):
+    //      [ x'x  x'y  x'  y'x  y'y  y'  x  y  1 ] f = 0
+    //    A 9th zero row for exactly 8 points makes A square (null vector = last row of Vᵀ).
     cv::Mat A = cv::Mat::zeros(std::max(n, 9), 9, CV_64F);
     for (int i = 0; i < n; ++i) {
-        const cv::Point2d a = opt.normalise ? transform(T1, x1[size_t(i)]) : x1[size_t(i)];
-        const cv::Point2d b = opt.normalise ? transform(T2, x2[size_t(i)]) : x2[size_t(i)];
-        double* r = A.ptr<double>(i);
-        r[0] = b.x * a.x, r[1] = b.x * a.y, r[2] = b.x;
-        r[3] = b.y * a.x, r[4] = b.y * a.y, r[5] = b.y;
-        r[6] = a.x, r[7] = a.y, r[8] = 1;
+        const cv::Point2d a = transform(T1, x1[size_t(i)]), b = transform(T2, x2[size_t(i)]);
+        const double row[9] = {b.x * a.x, b.x * a.y, b.x, b.y * a.x, b.y * a.y, b.y, a.x, a.y, 1};
+        for (int k = 0; k < 9; ++k) A.at<double>(i, k) = row[k];
     }
-    cv::Mat w, u, vt;
-    cv::SVD::compute(A, w, u, vt, cv::SVD::MODIFY_A);  // thin: A has at least 9 rows
+    cv::Mat w, U, vt;
+    cv::SVD::compute(A, w, U, vt);
     if (w.at<double>(7) < 1e-12 * std::max(1.0, w.at<double>(0))) return std::nullopt;  // f not unique
     cv::Matx33d F;
     for (int k = 0; k < 9; ++k) F(k / 3, k % 3) = vt.at<double>(8, k);
 
-    if (opt.enforceRank2) {
-        cv::Matx31d s;
-        cv::Matx33d U, Vt;
-        cv::SVD::compute(F, s, U, Vt);
-        F = U * cv::Matx33d::diag({s(0), s(1), 0.0}) * Vt;
-    }
+    // 3. Rank 2, then back to pixels: x̃ = T x, so x2ᵀ T2ᵀ F̃ T1 x1 = 0 and F = T2ᵀ F̃ T1.
+    if (opt.enforceRank2) F = nearestRankTwo(F);
     F = T2.t() * F * T1;
     const double norm = cv::norm(F);
     if (norm < 1e-300) return std::nullopt;
@@ -104,34 +113,44 @@ cv::Matx33d fundamentalFromCameras(const cv::Matx33d& K1, const cv::Matx33d& K2,
     return F * (1.0 / cv::norm(F));
 }
 
+namespace {
+
+// What RANSAC needs to fit fundamental matrices (see ransac.hpp).
+struct FundamentalProblem {
+    using Model = cv::Matx33d;
+    const Points& x1;
+    const Points& x2;
+    EightPointOptions options;
+
+    int size() const { return int(x1.size()); }
+    int sampleSize() const { return 8; }
+
+    std::optional<Model> fitAll(const std::vector<int>& indices) const {
+        Points a, b;
+        for (int i : indices) {
+            a.push_back(x1[size_t(i)]);
+            b.push_back(x2[size_t(i)]);
+        }
+        return eightPoint(a, b, options);
+    }
+
+    std::vector<Model> fitMinimal(const std::vector<int>& sample) const {
+        const auto F = fitAll(sample);
+        if (!F) return {};
+        return {*F};
+    }
+
+    void residuals(const Model& F, std::vector<double>& r) const {
+        r.resize(x1.size());
+        for (size_t i = 0; i < x1.size(); ++i) r[i] = sampsonDistance(F, x1[i], x2[i]);
+    }
+};
+
+}  // namespace
+
 FundamentalEstimate estimateFundamental(const Points& x1, const Points& x2, const RansacParams& p,
                                         EightPointOptions opt, std::stop_token stop) {
-    const int n = static_cast<int>(x1.size());
-    auto gather = [&](std::span<const int> idx, Points& a, Points& b) {
-        a.resize(idx.size());
-        b.resize(idx.size());
-        for (size_t k = 0; k < idx.size(); ++k) a[k] = x1[size_t(idx[k])], b[k] = x2[size_t(idx[k])];
-    };
-    RansacProblem<cv::Matx33d> pb;
-    pb.size = n;
-    pb.sampleSize = 8;
-    pb.fit = [&](std::span<const int> idx) -> std::vector<cv::Matx33d> {
-        Points a, b;
-        gather(idx, a, b);
-        const auto F = eightPoint(a, b, opt);
-        return F ? std::vector<cv::Matx33d>{*F} : std::vector<cv::Matx33d>{};
-    };
-    pb.residuals = [&](const cv::Matx33d& F, std::vector<double>& r) {
-        r.resize(size_t(n));
-        for (int i = 0; i < n; ++i) r[size_t(i)] = sampsonDistance(F, x1[size_t(i)], x2[size_t(i)]);
-    };
-    pb.refit = [&](std::span<const int> idx) {
-        Points a, b;
-        gather(idx, a, b);
-        return eightPoint(a, b, opt);
-    };
-    const auto r = ransac(pb, p, stop);
-
+    const auto r = ransac(FundamentalProblem{x1, x2, opt}, p, stop);
     FundamentalEstimate e;
     e.report = r.report;
     e.inliers = r.inliers;
@@ -139,13 +158,13 @@ FundamentalEstimate estimateFundamental(const Points& x1, const Points& x2, cons
     if (!r.model) return e;
     e.F = *r.model;
     e.ok = true;
-    double s = 0;
-    for (int i = 0; i < n; ++i)
-        if (e.inliers[size_t(i)]) s += sampsonDistance(e.F, x1[size_t(i)], x2[size_t(i)]);
-    e.meanSampson = e.nInliers ? s / e.nInliers : 0.0;
-    cv::Matx31d sv;
-    cv::SVD::compute(e.F, sv);
-    e.singularValues = {sv(0), sv(1), sv(2)};
+    double sum = 0;
+    for (size_t i = 0; i < x1.size(); ++i)
+        if (e.inliers[i]) sum += sampsonDistance(e.F, x1[i], x2[i]);
+    e.meanSampson = e.nInliers ? sum / e.nInliers : 0.0;
+    cv::Matx31d sigma;
+    cv::SVD::compute(e.F, sigma);
+    e.singularValues = {sigma(0), sigma(1), sigma(2)};
     return e;
 }
 

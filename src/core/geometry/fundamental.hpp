@@ -1,22 +1,27 @@
 #pragma once
-// Epipolar geometry of two uncalibrated views.
+// Epipolar geometry of two uncalibrated views. Course "3D Vision and Motion", part 5, with RANSAC
+// from part 4.
 //
-// A 3D point X seen at x1 in image 1 and x2 in image 2: the two rays and the baseline are coplanar,
-// which in pixel coordinates reads  x2ᵀ F x1 = 0  (convention used throughout this file). F is 3x3,
-// rank 2, defined up to scale (7 degrees of freedom). F x1 is the epipolar line of x1 in image 2;
-// Fᵀ x2 the line of x2 in image 1. All epipolar lines of image 1 meet at the epipole e1 (F e1 = 0,
-// the image of camera 2's centre), those of image 2 at e2 (Fᵀ e2 = 0).
+// A 3D point seen at x1 in image 1 and x2 in image 2: the two rays and the baseline are coplanar,
+// which in pixel coordinates reads  x2ᵀ F x1 = 0  (the convention throughout). F is 3×3, rank 2,
+// defined up to scale (7 degrees of freedom). F x1 is the epipolar line of x1 in image 2, Fᵀ x2 the
+// line of x2 in image 1. All lines of image 1 meet at the epipole e1 (F e1 = 0, the image of camera
+// 2's centre), those of image 2 at e2 (Fᵀ e2 = 0).
 //
-// Normalised 8-point algorithm (Hartley 1997): each correspondence gives one linear equation in the
-// 9 entries of F, A f = 0; f is the singular vector of A for the smallest singular value. Then
-//  - rank 2 is enforced by zeroing the smallest singular value of F (the closest rank-2 matrix in the
-//    Frobenius norm). Without it, epipolar lines do not meet in one point.
-//  - Coordinates are normalised (centroid 0, mean distance √2) before, and F de-normalised after:
-//    F = T2ᵀ F̃ T1. Without it, the monomials x·x' (~10⁶) and 1 differ by six orders of magnitude.
+// Steps (fundamental.cpp):
+//   1. hartleyNormalisation  centroid 0, mean distance √2 in each image (homography.hpp): without it
+//                            the monomials x·x' (~10⁶) and 1 differ by six orders of magnitude
+//   2. eightPoint            one equation per pair in the 9 entries of F, A f = 0; f = singular vector
+//                            of A for the smallest singular value; de-normalised by F = T2ᵀ F̃ T1
+//   3. (inside eightPoint)   rank 2: zero the smallest singular value of F (the nearest rank-2 matrix
+//                            in Frobenius norm); without it the epipolar lines do not meet in one point
+//   4. sampsonDistance       residual of a pair: first-order approximation of the geometric error,
+//                              d = |x2ᵀ F x1| / √((F x1)₁² + (F x1)₂² + (Fᵀ x2)₁² + (Fᵀ x2)₂²)  (pixels)
+//   5. estimateFundamental   RANSAC over 8-point samples scored by Sampson distance, then the 8-point
+//                            algorithm on all inliers
+//   6. epipoles              null vectors of F and Fᵀ, from its SVD
 //
-// RANSAC scores each correspondence by its Sampson distance: the first-order approximation of the
-// geometric (reprojection) error, in pixels,
-//   d = |x2ᵀ F x1| / sqrt((F x1)₁² + (F x1)₂² + (Fᵀ x2)₁² + (Fᵀ x2)₂²).
+// Cost: one n × 9 SVD per fit, O(n) per residual pass.
 
 #include <optional>
 #include <stop_token>

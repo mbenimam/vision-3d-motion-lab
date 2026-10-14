@@ -45,10 +45,12 @@ function(vl_core_area name)
 endfunction()
 
 vl_core_area(common)
-foreach(area geometry stereo motion flow)
+foreach(area geometry stereo motion flow scanner)
   vl_core_area(${area} vl_common)
   target_link_libraries(vl_${area} PUBLIC vl_common)
 endforeach()
+# The document scanner reuses the homography (DLT) of the geometry area.
+target_link_libraries(vl_scanner PUBLIC vl_geometry)
 
 # ---------------------------------------------------------------- app: Qt 6 Widgets, model / controller / view
 if(VL_BUILD_APP)
@@ -74,7 +76,7 @@ if(VL_BUILD_APP)
 
   # Modules register themselves, so they are object libraries linked whole into the executable.
   set(module_objs)
-  foreach(area geometry stereo motion flow)
+  foreach(area geometry stereo motion flow scanner)
     file(GLOB msrcs CONFIGURE_DEPENDS src/app/modules/${area}/*.cpp)
     if(msrcs)
       add_library(vl_modules_${area} OBJECT ${msrcs})
@@ -99,7 +101,7 @@ if(VL_BUILD_TESTS)
     FetchContent_MakeAvailable(googletest)
   endif()
   include(GoogleTest)
-  foreach(area common geometry stereo motion flow)
+  foreach(area common geometry stereo motion flow scanner)
     file(GLOB tsrcs CONFIGURE_DEPENDS tests/${area}/*.cpp)
     if(tsrcs)
       add_executable(test_${area} ${tsrcs})
