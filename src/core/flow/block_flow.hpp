@@ -1,16 +1,15 @@
 #pragma once
-// Block-matching flow: the simplest dense estimator. For each pixel of frame 0, compare its
-// (2r+1)² block with every block of frame 1 displaced by (dx, dy) in a (2S+1)² search window and
-// keep the displacement with the lowest cost (SAD or SSD of grey levels).
+// Block-matching optical flow, the simplest dense estimator. Course: "3D Vision and Motion",
+// part 11 (and part 6 for the same idea in stereo, where the search is along a row).
 //
-// Like the stereo version, the cost of one displacement is computed for the whole image and summed
-// over the block with a box filter, so the price is O(W·H·(2S+1)²) whatever the block size. Integer
-// by nature; the optional sub-pixel step fits a parabola through the costs of the 4 neighbouring
-// displacements, separately in x and y.
-//
-// Its failure modes are the ones the variational methods address: flat areas and edges give
-// ambiguous minima (the aperture problem, no smoothness to fill in), and motion larger than S is
-// simply not searched.
+// For each pixel x of frame 0, compare its (2r+1)² block with the block of frame 1 displaced by
+// d = (dx, dy), for every d of a (2S+1)² search window, and keep the d of least cost:
+//     C(x, d) = mean over the block of |I0(x') − I1(x' + d)|   (SAD)   or   (I0(x') − I1(x' + d))²   (SSD)
+//     w(x) = argmin_d C(x, d)
+// No linearisation, so no limit on the size of the motion other than S; but flat areas and straight
+// edges give ambiguous minima (the aperture problem, with no smoothness to fill in), and the answer
+// is a whole number of pixels unless refined. Cost O(W·H·(2S+1)²) whatever the block size (the block
+// sums come from an integral image).
 
 #include <stop_token>
 
@@ -40,7 +39,7 @@ BlockFlowResult blockMatchFlow(const cv::Mat& frame0, const cv::Mat& frame1, con
                                std::stop_token stop = {}, const ProgressFn& progress = {});
 
 // The cost of every displacement of the search window for one pixel: a (2S+1)² CV_32F image whose
-// centre is zero motion (row = dy + S, column = dx + S). Blocks are clipped at the image border.
+// centre is zero motion (row = dy + S, column = dx + S); infinite where x + d leaves frame 1.
 // I0, I1: grey CV_32F frames. O((2S+1)²·(2r+1)²); meant for one clicked pixel.
 cv::Mat blockCostSurface(const cv::Mat& I0, const cv::Mat& I1, cv::Point p, const BlockFlowParams& params);
 

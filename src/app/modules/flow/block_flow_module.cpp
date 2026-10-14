@@ -9,6 +9,8 @@
 #include "app/modules/flow/flow_views.hpp"
 #include "core/common/image.hpp"
 #include "core/flow/block_flow.hpp"
+#include "core/flow/flow_eval.hpp"
+#include "core/flow/opencv_baselines.hpp"
 
 namespace vl::app {
 namespace {
@@ -25,7 +27,9 @@ public:
                                "straight edge: many displacements fit equally well."),
                 QStringLiteral("on <i>Synthetic: flat square</i>, click inside the square: the cost dots in Frame 2 are "
                                "flat, every displacement fits. Click its top edge: a valley along the edge."),
-                InputKind::ImagePair, 700, QStringLiteral("Flow")};
+                InputKind::ImagePair, 700, QStringLiteral("Flow"), QStringLiteral("cv::DISOpticalFlow"),
+                {QStringLiteral("src/core/flow/block_flow.hpp"), QStringLiteral("src/core/flow/block_flow.cpp"),
+                 QStringLiteral("src/core/common/filters.hpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -53,7 +57,9 @@ public:
         bp.search = intParam(p, "search");
         bp.cost = static_cast<vl::flow::BlockCost>(intParam(p, "cost"));
         bp.subpixel = toggleParam(p, "subpixel");
+        const vl::Stopwatch clock;
         const auto res = vl::flow::blockMatchFlow(in.images[0], in.images[1], bp, ctx.stop, ctx.progress);
+        const double oursMs = clock.ms();
 
         // Mechanism: how well the best block fits. High where nothing matches (occlusions, motion out of range).
         const cv::Mat cost = res.cost;
@@ -77,6 +83,15 @@ public:
         if (pres.truthMax() > bp.search + 0.5)
             out.note = QStringLiteral("The true motion reaches %1 px, beyond the search radius: those pixels cannot be "
                                       "matched. Raise the search radius.").arg(pres.truthMax(), 0, 'f', 1);
+        if (ctx.compare) {
+            // DIS, OpenCV's patch-based method: coarse-to-fine patch search plus a variational refinement.
+            const auto baseline = vl::flow::opencv::dis(in.images[0], in.images[1]);
+            ExtraComparison gross;
+            if (pres.hasTruth())
+                gross = Comparison{QStringLiteral("Pixels with error > 3 px"), 100 * vl::flow::evaluateFlow(res.flow, in.truth[0]).over3,
+                                   100 * vl::flow::evaluateFlow(baseline.flow, in.truth[0]).over3, QStringLiteral(" %"), 1};
+            addComparison(out, in, pres, res.flow, oursMs, baseline.flow, baseline.ms, QStringLiteral("DISOpticalFlow, PRESET_MEDIUM"), gross);
+        }
         return out;
     }
 

@@ -1,21 +1,19 @@
 #pragma once
-// Dense Lucas–Kanade (1981): a local method. One constraint Ix·u + Iy·v + It = 0 per pixel cannot
-// fix two unknowns, so assume the flow is constant over a Gaussian window G_σ and solve, at every
-// pixel, the 2x2 least-squares system
+// Dense Lucas–Kanade (1981), a local optical-flow method. Course: "3D Vision and Motion", part 11.
 //
-//     [ G*Ix²   G*IxIy ] [du]     [ G*IxIt ]
-//     [ G*IxIy  G*Iy²  ] [dv] = - [ G*IyIt ]         (J · dw = -b, J the structure tensor)
+// One constraint Ix·u + Iy·v + It = 0 per pixel cannot fix two unknowns, so assume the flow is
+// constant over a Gaussian window G_σ around each pixel and solve the 2×2 least-squares system
 //
-// in closed form. The eigenvalues of J say how well the window constrains the motion: both large on
-// a corner or texture, one ~0 along a straight edge (only the normal component is measurable: the
-// aperture problem), both ~0 on a flat area. The smallest eigenvalue is returned as a confidence.
-// A tiny Tikhonov term keeps the solve defined; on an edge it then returns the normal flow.
+//     [ G*Ix²   G*IxIy ] [u]     [ G*IxIt ]
+//     [ G*IxIy  G*Iy²  ] [v] = − [ G*IyIt ]          J·w = −b,  J the structure tensor,
 //
-// Linearisation only holds for motions of about a pixel, hence:
-//  - iterations with warping (Gauss–Newton): re-warp I1 by the current flow, solve for the increment;
-//  - coarse to fine (Bouguet's pyramidal LK): estimate on a halved, blurred copy where the motion is
-//    halved too, upsample, refine on the next level.
-// Cost: O(levels · iterations · W·H·σ) (separable Gaussian sums of five products per iteration).
+// in closed form at every pixel. The eigenvalues λ1 ≥ λ2 of J say how well the window pins the motion
+// down: both large on texture or a corner; λ2 ≈ 0 along a straight edge (only the motion across the
+// edge is measurable: the aperture problem); both ≈ 0 on a flat area. λ2 is returned as a confidence.
+//
+// Linearisation holds for about a pixel of motion, hence warping iterations (Gauss–Newton) on a
+// Gaussian pyramid, coarse to fine (Bouguet's pyramidal LK). See lucas_kanade.cpp for the steps.
+// Cost: O(levels · iterations · W·H·σ) (five separable Gaussian window sums per iteration).
 
 #include <stop_token>
 #include <vector>
@@ -33,15 +31,15 @@ struct LucasKanadeParams {
     int iterations = 3;           // warping iterations per level
     double presmooth = 0.5;       // Gaussian blur of the frames before derivatives (px), 0 = none
     double minEigen = 0.0;        // pixels whose smallest eigenvalue is below this get NaN (0 = keep all)
-    double tikhonov = 0.1;        // ε added to the diagonal of J (grey²/px²)
+    double tikhonov = 0.1;        // ε added to the diagonal of J (grey²/px²), keeps the solve defined
 };
 
 struct LucasKanadeResult {
     cv::Mat flow;         // CV_32FC2, NaN where rejected by minEigen
     cv::Mat minEigen;     // CV_32F, λ2 (smallest eigenvalue of J) at the finest level, grey²/px²
     cv::Mat maxEigen;     // CV_32F, λ1
-    cv::Mat tensor;       // CV_32FC3, (Ix², IxIy, Iy²) summed over the window at the finest level
-    std::vector<double> meanUpdate;  // mean |dw| per iteration (px, in full-resolution units), all levels in order
+    cv::Mat tensor;       // CV_32FC3, (G*Ix², G*IxIy, G*Iy²) at the finest level
+    std::vector<double> meanUpdate;  // mean |Δw| per iteration (px, in full-resolution units), all levels in order
     int levelsUsed = 0;
 };
 

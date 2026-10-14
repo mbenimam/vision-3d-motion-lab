@@ -10,7 +10,9 @@
 #include "app/modules/flow/flow_samples.hpp"
 #include "app/modules/flow/flow_views.hpp"
 #include "core/common/image.hpp"
+#include "core/flow/flow_eval.hpp"
 #include "core/flow/lucas_kanade.hpp"
+#include "core/flow/opencv_baselines.hpp"
 
 namespace vl::app {
 namespace {
@@ -43,7 +45,10 @@ public:
                                "is seen, the <b>aperture problem</b>."),
                 QStringLiteral("turn <i>Coarse to fine</i> off on <i>Synthetic: rotation and zoom</i>: the corners, "
                                "which move 11 px, fall apart. Then click the edge of the <i>flat square</i>."),
-                InputKind::ImagePair, 710, QStringLiteral("Frame 1")};
+                InputKind::ImagePair, 710, QStringLiteral("Frame 1"), QStringLiteral("cv::calcOpticalFlowPyrLK"),
+                {QStringLiteral("src/core/flow/lucas_kanade.hpp"), QStringLiteral("src/core/flow/lucas_kanade.cpp"),
+                 QStringLiteral("src/core/flow/flow_common.hpp"), QStringLiteral("src/core/flow/flow_common.cpp"),
+                 QStringLiteral("src/core/common/filters.hpp"), QStringLiteral("src/core/common/filters.cpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -76,7 +81,9 @@ public:
         lp.levels = c2f ? intParam(p, "levels") : 1;
         lp.iterations = intParam(p, "iterations");
         lp.minEigen = realParam(p, "minEigen");
+        const vl::Stopwatch clock;
         const auto res = vl::flow::lucasKanade(in.images[0], in.images[1], lp, ctx.stop, ctx.progress);
+        const double oursMs = clock.ms();
 
         // Mechanism: the smallest eigenvalue of the structure tensor, on a log scale up to the image's 99th percentile.
         cv::Mat logL2;
@@ -101,7 +108,20 @@ public:
         if (!c2f && pres.truthMax() > 2.5)
             out.note = QStringLiteral("The true motion reaches %1 px; one scale only linearises about a pixel or two. "
                                       "Turn coarse to fine on.").arg(pres.truthMax(), 0, 'f', 1);
+        if (ctx.compare) compareWithOpenCv(in, lp, pres, res.flow, oursMs, out);
         return out;
+    }
+
+    // OpenCV's pyramidal LK at every pixel (one tracked point per pixel), with the same pyramid and
+    // a square window of about the same reach as our Gaussian one (±2σ holds 95 % of its weight).
+    static void compareWithOpenCv(const Inputs& in, const vl::flow::LucasKanadeParams& lp, const Presenter& pres,
+                                  const cv::Mat& ours, double oursMs, Output& out) {
+        const int radius = int(std::lround(2 * lp.sigma));
+        const auto baseline = vl::flow::opencv::pyramidalLucasKanade(in.images[0], in.images[1], radius, lp.levels);
+        const Comparison coverage{QStringLiteral("Pixels with an estimate"), coveragePercent(ours), coveragePercent(baseline.flow),
+                                  QStringLiteral(" %"), 1, false};
+        addComparison(out, in, pres, ours, oursMs, baseline.flow, baseline.ms,
+                      QStringLiteral("calcOpticalFlowPyrLK, %1×%1 window").arg(2 * radius + 1), coverage);
     }
 
     // Click a pixel: its window, and the ellipse of displacements that fit the window about equally

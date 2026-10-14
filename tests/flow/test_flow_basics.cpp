@@ -52,7 +52,7 @@ TEST(FlowDerivatives, AveragedOverBothFrames) {
 }
 
 TEST(FlowPyramid, HalvesUntilTooSmall) {
-    const auto pyr = gaussianPyramid(cv::Mat::zeros(100, 120, CV_32F), 6, 16);
+    const auto pyr = buildPyramid(cv::Mat::zeros(100, 120, CV_32F), 6, 16);
     ASSERT_EQ(pyr.size(), 3u);  // 120x100 -> 60x50 -> 30x25; 15x13 would be under 16
     EXPECT_EQ(pyr[1].size(), cv::Size(60, 50));
     EXPECT_EQ(pyr[2].size(), cv::Size(30, 25));
@@ -70,9 +70,9 @@ TEST(FlowWarp, IntegerShiftAndOutsideMask) {
     EXPECT_EQ(outside.at<uchar>(5, 5), 0);
 }
 
-TEST(FlowWarp, ResizeScalesVectors) {
+TEST(FlowWarp, UpsampleScalesVectors) {
     const cv::Mat f(10, 20, CV_32FC2, cv::Scalar(1.5, -2));
-    const cv::Mat g = resizeFlow(f, {40, 20});
+    const cv::Mat g = upsampleFlow(f, {40, 20}, 2.f);
     EXPECT_NEAR(g.at<cv::Vec2f>(7, 13)[0], 3.0f, 1e-5f);
     EXPECT_NEAR(g.at<cv::Vec2f>(7, 13)[1], -4.0f, 1e-5f);
 }

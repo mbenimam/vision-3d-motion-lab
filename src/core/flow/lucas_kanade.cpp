@@ -1,3 +1,18 @@
+// Dense pyramidal Lucas–Kanade. Course: "3D Vision and Motion", part 11.
+//
+// The method, one function per step:
+//   1. buildPyramid        both frames, halved levels − 1 times (flow_common)
+//   2. upsampleFlow        coarsest level first; each level starts from the coarser answer, doubled
+//   3. linearise           warp I1 by the current flow w, take Ix, Iy, It (flow_common): the constraint is
+//                          now about the small remainder only
+//   4. windowSums          the structure tensor J and the right-hand side, summed over a Gaussian window
+//   5. solveWindows        the 2×2 normal equations at every pixel, in closed form
+//   6. tensorEigenvalues   λ1, λ2 of J at the finest level: how well each window pins the motion down
+//   7. rejectWeakWindows   optional: no estimate where λ2 is small (Bouguet's reliability test)
+// Steps 3 to 5 repeat `iterations` times per level (Gauss–Newton on brightness constancy).
+//
+// Cost: O(levels · iterations · W·H·σ): the window sums are separable Gaussian blurs.
+
 #include "core/flow/lucas_kanade.hpp"
 
 #include <cmath>
@@ -5,102 +20,118 @@
 #include <string>
 #include <vector>
 
-#include <opencv2/imgproc.hpp>
+#include "core/common/filters.hpp"
 
 namespace vl::flow {
+namespace {
+
+// J = [a b; b c] and the right-hand side r = (r1, r2) of the normal equations, per pixel.
+struct WindowSystem {
+    cv::Mat a, b, c, r1, r2;  // CV_32F
+};
+
+// Step 4. Each pixel x' of the window was linearised around its own flow w(x') = (u', v'), so the
+// constraint it puts on the window's flow W = (U, V) is
+//     Ix·(U − u') + Iy·(V − v') + It = 0.
+// Least squares over the window, E(W) = Σ G(x − x')·(Ix·(U − u') + Iy·(V − v') + It)², and
+// ∂E/∂U = ∂E/∂V = 0 give J·W = r with
+//     J = G * [Ix²  IxIy; IxIy  Iy²],   r = G * [Ix²·u + IxIy·v − Ix·It;  IxIy·u + Iy²·v − Iy·It].
+// Solving for W itself rather than for an increment stays exact when w varies inside the window
+// (the increment form would mix the flows of different pixels and drift).
+WindowSystem windowSums(const Derivatives& d, const cv::Mat& w, double sigma) {
+    std::vector<cv::Mat> uv;
+    cv::split(w, uv);
+    const cv::Mat& u = uv[0];
+    const cv::Mat& v = uv[1];
+    const cv::Mat IxIx = d.Ix.mul(d.Ix), IxIy = d.Ix.mul(d.Iy), IyIy = d.Iy.mul(d.Iy);
+    WindowSystem s;
+    s.a = vl::gaussianBlur(IxIx, sigma);
+    s.b = vl::gaussianBlur(IxIy, sigma);
+    s.c = vl::gaussianBlur(IyIy, sigma);
+    s.r1 = vl::gaussianBlur(IxIx.mul(u) + IxIy.mul(v) - d.Ix.mul(d.It), sigma);
+    s.r2 = vl::gaussianBlur(IxIy.mul(u) + IyIy.mul(v) - d.Iy.mul(d.It), sigma);
+    return s;
+}
+
+// Step 5. At every pixel, (J + εI)·W = r + ε·w solved by Cramer's rule:
+//     det = (a + ε)(c + ε) − b²,   U = ((c + ε)·r1' − b·r2') / det,   V = ((a + ε)·r2' − b·r1') / det
+// with r' = r + ε·w. The small ε keeps the previous estimate where the window says nothing (flat
+// area); along an edge only the component across the edge changes. Returns the mean |Δw|.
+double solveWindows(const WindowSystem& s, float eps, cv::Mat& w) {
+    double sumUpdate = 0;
+    for (int y = 0; y < w.rows; ++y)
+        for (int x = 0; x < w.cols; ++x) {
+            const cv::Vec2f old = w.at<cv::Vec2f>(y, x);
+            const float a = s.a.at<float>(y, x) + eps, b = s.b.at<float>(y, x), c = s.c.at<float>(y, x) + eps;
+            const float r1 = s.r1.at<float>(y, x) + eps * old[0], r2 = s.r2.at<float>(y, x) + eps * old[1];
+            const float det = a * c - b * b;
+            const cv::Vec2f W((c * r1 - b * r2) / det, (a * r2 - b * r1) / det);
+            w.at<cv::Vec2f>(y, x) = W;
+            sumUpdate += cv::norm(W - old);
+        }
+    return sumUpdate / double(w.total());
+}
+
+// Step 6. The eigenvalues of the symmetric J = [a b; b c]:
+//     λ1,2 = (a + c)/2 ± √(((a − c)/2)² + b²)
+void tensorEigenvalues(const WindowSystem& s, cv::Mat& lambda1, cv::Mat& lambda2) {
+    lambda1.create(s.a.size(), CV_32F);
+    lambda2.create(s.a.size(), CV_32F);
+    for (int y = 0; y < s.a.rows; ++y)
+        for (int x = 0; x < s.a.cols; ++x) {
+            const float a = s.a.at<float>(y, x), b = s.b.at<float>(y, x), c = s.c.at<float>(y, x);
+            const float mean = 0.5f * (a + c);
+            const float radius = std::sqrt(0.25f * (a - c) * (a - c) + b * b);
+            lambda1.at<float>(y, x) = mean + radius;
+            lambda2.at<float>(y, x) = std::max(0.f, mean - radius);  // ≥ 0 in theory; rounding can dip below
+        }
+}
+
+// Step 7. A window is reliable when even its weakest direction is constrained: λ2 ≥ threshold.
+void rejectWeakWindows(cv::Mat& w, const cv::Mat& lambda2, double threshold) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (int y = 0; y < w.rows; ++y)
+        for (int x = 0; x < w.cols; ++x)
+            if (lambda2.at<float>(y, x) < threshold) w.at<cv::Vec2f>(y, x) = {nan, nan};
+}
+
+}  // namespace
 
 LucasKanadeResult lucasKanade(const cv::Mat& frame0, const cv::Mat& frame1, const LucasKanadeParams& p,
                               std::stop_token stop, const ProgressFn& progress, const FlowCallback& onStep) {
     CV_Assert(frame0.size() == frame1.size() && p.sigma > 0 && p.levels >= 1 && p.iterations >= 1);
-    const auto pyr0 = gaussianPyramid(prepareFrame(frame0, p.presmooth), p.levels);
-    const auto pyr1 = gaussianPyramid(prepareFrame(frame1, p.presmooth), int(pyr0.size()));
+    // 1. Pyramids of both frames.
+    const auto pyr0 = buildPyramid(prepareFrame(frame0, p.presmooth), p.levels);
+    const auto pyr1 = buildPyramid(prepareFrame(frame1, p.presmooth), int(pyr0.size()));
     const int L = int(pyr0.size());
-    const float eps = float(p.tikhonov);
 
     LucasKanadeResult res;
     res.levelsUsed = L;
     cv::Mat w = cv::Mat::zeros(pyr0.back().size(), CV_32FC2);
-    cv::Mat a, b, c, bx, by, outside;  // J = [a b; b c], right-hand side (bx, by)
-    const int total = L * p.iterations;
+    WindowSystem system;
     for (int l = L - 1; l >= 0; --l) {
         const cv::Mat& I0 = pyr0[size_t(l)];
         const cv::Mat& I1 = pyr1[size_t(l)];
-        if (w.size() != I0.size()) w = resizeFlow(w, I0.size());
-        const float toFull = float(frame0.cols) / float(I0.cols);  // level pixels -> full-resolution pixels
+        // 2. Start from the coarser level's answer: twice the vectors, on a grid twice as fine.
+        if (l < L - 1) w = upsampleFlow(w, I0.size(), 2.f);
+        const float toFull = float(1 << l);  // one pixel of level l is 2^l pixels of the frame
         for (int it = 0; it < p.iterations; ++it) {
             checkStop(stop);
-            const int step = (L - 1 - l) * p.iterations + it;
-            report(progress, double(step) / total,
-                   "level " + std::to_string(L - l) + " / " + std::to_string(L) + ", iteration " + std::to_string(it + 1));
-
-            // Linearise around the current flow: compare I0 with I1 warped back by w.
-            const cv::Mat I1w = warpImage(I1, w, &outside);
-            Derivatives d = derivatives(I0, I1w, true);
-            d.Ix.setTo(0, outside);  // a pixel that left the frame says nothing
-            d.Iy.setTo(0, outside);
-            d.It.setTo(0, outside);
-
-            // Each pixel x' of the window was linearised around its own flow w(x'), so the constraint it
-            // gives on the window's (constant) flow W is  ∇I(x')·(W - w(x')) + It(x') = 0. Least squares
-            // over the window: J·W = G * [∇I ∇Iᵀ w - ∇I It] =: r. Solving for W rather than for an
-            // increment keeps the iterations exact when w varies inside the window (the classic increment
-            // form would mix the flows of different pixels and drift). Five Gaussian sums per iteration.
-            std::vector<cv::Mat> uv;
-            cv::split(w, uv);
-            const cv::Mat xx = d.Ix.mul(d.Ix), xy = d.Ix.mul(d.Iy), yy = d.Iy.mul(d.Iy);
-            const auto window = [&](const cv::Mat& m, cv::Mat& out) {
-                cv::GaussianBlur(m, out, cv::Size(), p.sigma, p.sigma, cv::BORDER_REPLICATE);
-            };
-            window(xx, a);
-            window(xy, b);
-            window(yy, c);
-            window(xx.mul(uv[0]) + xy.mul(uv[1]) - d.Ix.mul(d.It), bx);
-            window(xy.mul(uv[0]) + yy.mul(uv[1]) - d.Iy.mul(d.It), by);
-
-            const bool last = l == 0 && it == p.iterations - 1;
-            if (last) {
-                res.minEigen.create(I0.size(), CV_32F);
-                res.maxEigen.create(I0.size(), CV_32F);
-                cv::merge(std::vector<cv::Mat>{a, b, c}, res.tensor);
-            }
-            double sumUpdate = 0;
-            for (int y = 0; y < I0.rows; ++y) {
-                const float *pa = a.ptr<float>(y), *pb = b.ptr<float>(y), *pc = c.ptr<float>(y);
-                const float *pbx = bx.ptr<float>(y), *pby = by.ptr<float>(y);
-                auto* pw = w.ptr<cv::Vec2f>(y);
-                float* lo = last ? res.minEigen.ptr<float>(y) : nullptr;
-                float* hi = last ? res.maxEigen.ptr<float>(y) : nullptr;
-                for (int x = 0; x < I0.cols; ++x) {
-                    // (J + εI)·W = r + ε·w: the small ε keeps the previous estimate where the window
-                    // says nothing (flat area), and along an edge only the normal component changes.
-                    const float A = pa[x] + eps, B = pb[x], C = pc[x] + eps;
-                    const float det = A * C - B * B;
-                    const float rx = pbx[x] + eps * pw[x][0], ry = pby[x] + eps * pw[x][1];
-                    const float nu = (C * rx - B * ry) / det, nv = (A * ry - B * rx) / det;
-                    const float du = nu - pw[x][0], dv = nv - pw[x][1];
-                    pw[x][0] = nu;
-                    pw[x][1] = nv;
-                    sumUpdate += std::sqrt(du * du + dv * dv);
-                    if (lo) {
-                        // Eigenvalues of [a b; b c]: mean ± sqrt(((a - c)/2)² + b²).
-                        const float m = 0.5f * (pa[x] + pc[x]);
-                        const float r = std::sqrt(0.25f * (pa[x] - pc[x]) * (pa[x] - pc[x]) + pb[x] * pb[x]);
-                        lo[x] = std::max(0.f, m - r);
-                        hi[x] = m + r;
-                    }
-                }
-            }
-            res.meanUpdate.push_back(sumUpdate / double(I0.total()) * toFull);
-            if (onStep)
-                onStep(resizeFlow(w, frame0.size()),
-                       "level " + std::to_string(L - l) + " / " + std::to_string(L) + ", iteration " + std::to_string(it + 1));
+            const std::string stage =
+                "level " + std::to_string(L - l) + " / " + std::to_string(L) + ", iteration " + std::to_string(it + 1);
+            report(progress, double((L - 1 - l) * p.iterations + it) / (L * p.iterations), stage);
+            const Derivatives d = linearise(I0, I1, w);                         // 3.
+            system = windowSums(d, w, p.sigma);                                 // 4.
+            res.meanUpdate.push_back(solveWindows(system, float(p.tikhonov), w) * toFull);  // 5.
+            if (onStep) onStep(l == 0 ? w.clone() : upsampleFlow(w, frame0.size(), toFull), stage);
         }
     }
 
-    if (p.minEigen > 0) {
-        const double nan = std::numeric_limits<double>::quiet_NaN();
-        w.setTo(cv::Scalar(nan, nan), res.minEigen < p.minEigen);
-    }
+    // 6. The confidence of the last system solved, at full resolution.
+    tensorEigenvalues(system, res.maxEigen, res.minEigen);
+    cv::merge(std::vector<cv::Mat>{system.a, system.b, system.c}, res.tensor);
+    // 7. Optional reliability test.
+    if (p.minEigen > 0) rejectWeakWindows(w, res.minEigen, p.minEigen);
     res.flow = w;
     report(progress, 1.0, "done");
     return res;

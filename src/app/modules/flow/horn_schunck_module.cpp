@@ -7,7 +7,9 @@
 #include "app/modules/flow/flow_samples.hpp"
 #include "app/modules/flow/flow_views.hpp"
 #include "core/common/image.hpp"
+#include "core/flow/flow_eval.hpp"
 #include "core/flow/horn_schunck.hpp"
+#include "core/flow/opencv_baselines.hpp"
 
 namespace vl::app {
 namespace {
@@ -27,7 +29,10 @@ public:
                                "<b>spreads into</b> flat areas, and across motion boundaries too."),
                 QStringLiteral("on <i>Synthetic: flat square</i>, compare Flow with Lucas–Kanade's: the untextured "
                                "inside gets filled in. Then raise α to 40 and watch the square's outline blur."),
-                InputKind::ImagePair, 720, QStringLiteral("Flow")};
+                InputKind::ImagePair, 720, QStringLiteral("Flow"), QStringLiteral("cv::calcOpticalFlowFarneback"),
+                {QStringLiteral("src/core/flow/horn_schunck.hpp"), QStringLiteral("src/core/flow/horn_schunck.cpp"),
+                 QStringLiteral("src/core/flow/flow_common.hpp"), QStringLiteral("src/core/flow/flow_common.cpp"),
+                 QStringLiteral("src/core/common/filters.hpp"), QStringLiteral("src/core/common/filters.cpp")}};
     }
 
     std::vector<ParamSpec> params() const override {
@@ -59,7 +64,7 @@ public:
         hp.solver = static_cast<vl::flow::HornSchunckSolver>(intParam(p, "solver"));
         const bool c2f = toggleParam(p, "c2f");
         hp.levels = c2f ? intParam(p, "levels") : 1;
-        hp.reportEvery = 5;
+        hp.reportEvery = 25;  // each report brings the field to full resolution: not too often
 
         const Presenter pres(in, intParam(p, "arrows"));
         const auto placeholder = [&] {
@@ -70,15 +75,20 @@ public:
         // Partial pictures while it converges: the flow so far, at full resolution.
         Stopwatch since;
         bool first = true;
+        double picturesMs = 0;  // time spent drawing partial results, left out of the run time
         const auto onStep = [&](const cv::Mat& flow, const std::string& stage) {
             if (!ctx.partial || (!first && since.ms() < kPartialMs)) return;
+            const Stopwatch drawing;
             first = false;
             auto out = std::make_shared<Output>(pres.present(flow, placeholder()));
             out->note = QStringLiteral("Converging: %1").arg(QString::fromStdString(stage));
             ctx.partial(out);
+            picturesMs += drawing.ms();
             since = Stopwatch();  // count from here, so building pictures never dominates the run
         };
+        const Stopwatch clock;
         const auto res = vl::flow::hornSchunck(in.images[0], in.images[1], hp, ctx.stop, ctx.progress, onStep);
+        const double oursMs = clock.ms() - picturesMs;
 
         // Mechanism: how much of each pixel's update comes from its own data rather than its neighbours.
         const cv::Mat dw = res.dataWeight;
@@ -99,7 +109,20 @@ public:
         if (!c2f && pres.truthMax() > 2.5)
             out.note = QStringLiteral("The true motion reaches %1 px; one scale only linearises about a pixel or two. "
                                       "Turn coarse to fine on.").arg(pres.truthMax(), 0, 'f', 1);
+        if (ctx.compare) {
+            // Farnebäck, OpenCV's classic dense method, with the same number of pyramid levels.
+            const auto baseline = vl::flow::opencv::farneback(in.images[0], in.images[1], hp.levels);
+            addComparison(out, in, pres, res.flow, oursMs, baseline.flow, baseline.ms, QStringLiteral("calcOpticalFlowFarneback"),
+                          grossErrors(in, pres, res.flow, baseline.flow));
+        }
         return out;
+    }
+
+    // Share of pixels off by more than 3 px: where smoothing across a motion boundary costs most.
+    static ExtraComparison grossErrors(const Inputs& in, const Presenter& pres, const cv::Mat& ours, const cv::Mat& theirs) {
+        if (!pres.hasTruth()) return {};
+        return Comparison{QStringLiteral("Pixels with error > 3 px"), 100 * vl::flow::evaluateFlow(ours, in.truth[0]).over3,
+                          100 * vl::flow::evaluateFlow(theirs, in.truth[0]).over3, QStringLiteral(" %"), 1};
     }
 
     std::vector<ClickShapes> onClick(const Output& out, int, int, QPointF px) const override {

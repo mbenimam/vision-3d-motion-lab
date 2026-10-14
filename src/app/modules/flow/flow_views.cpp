@@ -107,10 +107,14 @@ Presenter::Presenter(const Inputs& in, int arrowStep) : in_(in), arrowStep_(arro
     }
 }
 
+float Presenter::colourScale(const cv::Mat& flow) const {
+    // One colour scale for estimate, truth and key: the truth's when known, so they compare directly.
+    return hasTruth() ? truthScale_ : vl::flow::robustMaxMagnitude(flow);
+}
+
 Output Presenter::present(const cv::Mat& flow, View mechanism, const MetaValues& extra) const {
     const cv::Size size = flow.size();
-    // One colour scale for estimate, truth and key: the truth's when known, so they compare directly.
-    const float scale = hasTruth() ? truthScale_ : vl::flow::robustMaxMagnitude(flow);
+    const float scale = colourScale(flow);
     const auto probe = flowProbe(flow, truth_);
 
     View f1{QStringLiteral("Frame 1"), frame1_};
@@ -186,6 +190,55 @@ Output Presenter::present(const cv::Mat& flow, View mechanism, const MetaValues&
     }
     out.frames.push_back(std::move(fr));
     return out;
+}
+
+double coveragePercent(const cv::Mat& flow) {
+    long finite = 0;
+    for (int y = 0; y < flow.rows; ++y)
+        for (int x = 0; x < flow.cols; ++x) {
+            const cv::Vec2f w = flow.at<cv::Vec2f>(y, x);
+            finite += std::isfinite(w[0]) && std::isfinite(w[1]);
+        }
+    return 100.0 * double(finite) / double(flow.total());
+}
+
+namespace {
+
+double meanFinite(const cv::Mat& m) {
+    double sum = 0;
+    long n = 0;
+    for (int y = 0; y < m.rows; ++y)
+        for (int x = 0; x < m.cols; ++x)
+            if (const float v = m.at<float>(y, x); std::isfinite(v)) {
+                sum += v;
+                ++n;
+            }
+    return n ? sum / double(n) : 0.0;
+}
+
+}  // namespace
+
+void addComparison(Output& out, const Inputs& in, const Presenter& pres, const cv::Mat& ours, double oursMs,
+                   const cv::Mat& theirs, double theirsMs, const QString& method, const ExtraComparison& extra) {
+    const float scale = pres.colourScale(ours);
+    const cv::Mat truth = pres.hasTruth() ? in.truth[0] : cv::Mat();
+    View v{QStringLiteral("OpenCV · Flow"), toQImage(vl::flow::flowToColor(theirs, scale)), {}, flowProbe(theirs, truth), theirs};
+    v.legend = Legend{QStringLiteral("%1 · rim = %2 px").arg(method).arg(double(scale), 0, 'f', 1), 0, double(scale), {}, {},
+                      toQImage(vl::flow::colorWheel({96, 96}, scale, 4))};
+    out.frames.front().views.push_back(std::move(v));
+
+    auto& rows = out.comparison;
+    if (pres.hasTruth()) {
+        const auto a = vl::flow::evaluateFlow(ours, truth), b = vl::flow::evaluateFlow(theirs, truth);
+        rows.push_back({QStringLiteral("Average endpoint error"), a.epe, b.epe, QStringLiteral(" px"), 3});
+        rows.push_back({QStringLiteral("Average angular error"), a.angular, b.angular, QStringLiteral("°"), 2});
+        rows.push_back({QStringLiteral("Pixels with error > 1 px"), 100 * a.over1, 100 * b.over1, QStringLiteral(" %"), 1});
+    }
+    if (extra) rows.push_back(*extra);
+    rows.push_back({QStringLiteral("Mean brightness residual"),
+                    meanFinite(vl::flow::brightnessResidual(in.images[0], in.images[1], ours)),
+                    meanFinite(vl::flow::brightnessResidual(in.images[0], in.images[1], theirs)), QStringLiteral(" grey"), 2});
+    rows.push_back({QStringLiteral("Run time"), oursMs, theirsMs, QStringLiteral(" ms"), 0});
 }
 
 std::vector<Module::ClickShapes> clickShapes(const Output& out, QPointF pixel) {

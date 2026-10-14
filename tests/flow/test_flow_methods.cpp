@@ -160,6 +160,27 @@ TEST(HornSchunck, JacobiAndGaussSeidelReachTheSameMinimiser) {
     EXPECT_NEAR(cv::mean(v2)[0], -0.3, 0.05);
 }
 
+TEST(HornSchunck, ConvergedFieldIsAMinimumAtEveryPixelBorderIncluded) {
+    // Gauss–Seidel's fixed point solves the Euler–Lagrange equations, so nudging any single u or v,
+    // on the border (where fewer neighbours give s < 1) as well as inside, cannot lower E.
+    cv::Mat Ix(10, 12, CV_32F), Iy(10, 12, CV_32F), It(10, 12, CV_32F);
+    cv::randu(Ix, -20, 20);
+    cv::randu(Iy, -20, 20);
+    cv::randu(It, -10, 10);
+    const double alpha = 15.0;
+    cv::Mat u = cv::Mat::zeros(Ix.size(), CV_32F), v = u.clone();
+    for (int i = 0; i < 3000; ++i) hornSchunckSweep(u, v, Ix, Iy, It, alpha, HornSchunckSolver::GaussSeidel);
+    const double e0 = hornSchunckEnergy(u, v, Ix, Iy, It, alpha);
+    for (const cv::Point p : {cv::Point(0, 0), cv::Point(5, 0), cv::Point(0, 4), cv::Point(11, 9), cv::Point(6, 5)})
+        for (cv::Mat* f : {&u, &v})
+            for (const float delta : {-0.02f, 0.02f}) {
+                cv::Mat g = f->clone();
+                g.at<float>(p) += delta;
+                const double e = f == &u ? hornSchunckEnergy(g, v, Ix, Iy, It, alpha) : hornSchunckEnergy(u, g, Ix, Iy, It, alpha);
+                EXPECT_GE(e, e0 - 1e-9) << "pixel " << p << (f == &u ? " u " : " v ") << delta;
+            }
+}
+
 TEST(HornSchunck, FillsInWhereLucasKanadeCannot) {
     // Inside the flat square (truth (2, 1)) there is no gradient: single-scale LK leaves it at zero,
     // HS propagates the motion of the edges inwards.
