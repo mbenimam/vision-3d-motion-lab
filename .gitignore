@@ -1,0 +1,7 @@
+build/
+data/
+graphify-out/
+.cache/
+compile_commands.json
+*.user
+*.autosave
